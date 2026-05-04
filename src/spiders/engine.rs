@@ -245,6 +245,7 @@ impl<S: Spider> CrawlerEngine<S> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn process_request(
         spider: Arc<S>,
         session_manager: Arc<SessionManager>,

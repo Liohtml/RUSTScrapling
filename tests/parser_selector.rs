@@ -1,4 +1,4 @@
-use rust_scrapling::parser::{Selector, Selectors};
+use rust_scrapling::parser::Selector;
 
 const HTML: &str = r#"
 <html>

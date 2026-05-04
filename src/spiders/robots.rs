@@ -104,10 +104,8 @@ impl RobotsTxtManager {
                         disallowed.clear();
                         crawl_delay = None;
                         in_matching_section = true;
-                    } else if !found_specific {
-                        in_matching_section = true;
                     } else {
-                        in_matching_section = false;
+                        in_matching_section = !found_specific;
                     }
                 } else {
                     if !found_specific {

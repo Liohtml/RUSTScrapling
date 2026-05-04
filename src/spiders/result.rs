@@ -31,10 +31,10 @@ impl ItemList {
     pub fn to_json(&self, path: &Path, indent: usize) -> io::Result<()> {
         let buf = if indent > 0 {
             serde_json::to_vec_pretty(&self.items)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+                .map_err(io::Error::other)?
         } else {
             serde_json::to_vec(&self.items)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+                .map_err(io::Error::other)?
         };
         fs::write(path, buf)
     }
@@ -44,7 +44,7 @@ impl ItemList {
         let mut file = fs::File::create(path)?;
         for item in &self.items {
             let line = serde_json::to_string(item)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                .map_err(io::Error::other)?;
             writeln!(file, "{}", line)?;
         }
         Ok(())

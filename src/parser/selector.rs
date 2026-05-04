@@ -4,14 +4,14 @@ use ego_tree::NodeId;
 use regex::Regex;
 use scraper::{ElementRef, Html, Node};
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::rc::Rc;
 use url::Url;
 
 /// A wrapper around a node in an HTML tree, providing CSS selection,
 /// text extraction, DOM navigation, regex, and JSON parsing.
 #[derive(Debug, Clone)]
 pub struct Selector {
-    tree: Arc<Html>,
+    tree: Rc<Html>,
     node_id: NodeId,
     url: String,
 }
@@ -22,7 +22,7 @@ impl Selector {
         let parsed = Html::parse_document(html);
         let root_id = parsed.tree.root().id();
         Self {
-            tree: Arc::new(parsed),
+            tree: Rc::new(parsed),
             node_id: root_id,
             url: String::new(),
         }
@@ -33,7 +33,7 @@ impl Selector {
         let parsed = Html::parse_document(html);
         let root_id = parsed.tree.root().id();
         Self {
-            tree: Arc::new(parsed),
+            tree: Rc::new(parsed),
             node_id: root_id,
             url: url.to_string(),
         }
@@ -42,7 +42,7 @@ impl Selector {
     /// Create a child Selector sharing the same tree but pointing to a different node.
     fn child_selector(&self, node_id: NodeId) -> Self {
         Self {
-            tree: Arc::clone(&self.tree),
+            tree: Rc::clone(&self.tree),
             node_id,
             url: self.url.clone(),
         }
@@ -459,7 +459,7 @@ impl Selector {
     /// Get the value of a specific attribute as a TextHandler.
     pub fn get_attribute(&self, key: &str) -> Option<TextHandler> {
         if let Some(el) = self.element_ref() {
-            el.value().attr(key).map(|v| TextHandler::new(v))
+            el.value().attr(key).map(TextHandler::new)
         } else {
             None
         }

@@ -21,7 +21,7 @@ impl CheckpointManager {
     pub fn save(&self, data: &CheckpointData) -> Result<(), std::io::Error> {
         let file_path = self.checkpoint_dir.join("checkpoint.json");
         let json = serde_json::to_string_pretty(data)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         std::fs::write(file_path, json)
     }
 
