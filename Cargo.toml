@@ -2,7 +2,15 @@
 name = "rust_scrapling"
 version = "0.1.0"
 edition = "2021"
-description = "A Rust port of Scrapling - modern web scraping framework"
+description = "A Rust port of Scrapling - modern web scraping framework with CSS selectors, async HTTP, and spider-based crawling"
+authors = ["Liohtml"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Liohtml/RUSTScrapling"
+homepage = "https://github.com/Liohtml/RUSTScrapling"
+keywords = ["scraping", "web-scraping", "html-parser", "css-selectors", "crawler"]
+categories = ["web-programming", "parser-implementations", "command-line-utilities"]
+readme = "README.md"
+rust-version = "1.75"
 
 [dependencies]
 scraper = "0.22"
