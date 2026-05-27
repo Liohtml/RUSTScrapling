@@ -172,3 +172,44 @@ fn proxy_rotator_len() {
     assert_eq!(rotator.len(), 2);
     assert!(!rotator.is_empty());
 }
+
+#[test]
+fn proxy_rotator_next_index_round_robin() {
+    let proxies = vec![
+        "http://a.example.com".to_string(),
+        "http://b.example.com".to_string(),
+        "http://c.example.com".to_string(),
+    ];
+    let rotator = ProxyRotator::new(proxies).unwrap();
+    assert_eq!(rotator.next_index(), 0);
+    assert_eq!(rotator.next_index(), 1);
+    assert_eq!(rotator.next_index(), 2);
+    assert_eq!(rotator.next_index(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// FetcherConfig – proxy configuration
+// ---------------------------------------------------------------------------
+
+#[test]
+fn builder_protocol_proxy_populates_map() {
+    let cfg = FetcherConfig::builder()
+        .protocol_proxy("HTTP", "http://p1.example.com")
+        .protocol_proxy("https", "http://p2.example.com")
+        .build();
+    assert_eq!(cfg.proxies.get("http").map(|s| s.as_str()), Some("http://p1.example.com"));
+    assert_eq!(cfg.proxies.get("https").map(|s| s.as_str()), Some("http://p2.example.com"));
+}
+
+#[test]
+fn builder_rotating_proxies_populates_list() {
+    let cfg = FetcherConfig::builder()
+        .rotating_proxies(vec!["http://p1.example.com", "http://p2.example.com"])
+        .build();
+    assert_eq!(cfg.proxy_list, vec!["http://p1.example.com", "http://p2.example.com"]);
+}
+
+#[test]
+fn default_proxy_list_is_empty() {
+    assert!(FetcherConfig::default().proxy_list.is_empty());
+}

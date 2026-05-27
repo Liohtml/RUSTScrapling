@@ -1,11 +1,15 @@
 use crate::fetchers::config::FetcherConfig;
+use crate::fetchers::proxy::ProxyRotator;
 use crate::fetchers::response::Response;
 use std::collections::HashMap;
 use std::time::Duration;
 
 pub struct Fetcher {
     config: FetcherConfig,
-    client: reqwest::Client,
+    /// One client per rotating proxy when rotation is enabled, otherwise a
+    /// single client. Indexed by `rotator` when present.
+    clients: Vec<reqwest::Client>,
+    rotator: Option<ProxyRotator>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -18,6 +22,32 @@ pub enum FetcherError {
 
 impl Fetcher {
     pub fn new(config: FetcherConfig) -> Self {
+        let (clients, rotator) = if config.proxy_list.is_empty() {
+            // No rotation: a single client honouring `proxy` and the
+            // per-protocol `proxies` map.
+            (vec![Self::build_client(&config, None)], None)
+        } else {
+            // Rotation: one client bound to each proxy, selected round-robin.
+            let clients = config
+                .proxy_list
+                .iter()
+                .map(|p| Self::build_client(&config, Some(p)))
+                .collect();
+            let rotator = ProxyRotator::new(config.proxy_list.clone());
+            (clients, rotator)
+        };
+
+        Self {
+            config,
+            clients,
+            rotator,
+        }
+    }
+
+    /// Build a single reqwest client. When `proxy_override` is `Some`, that
+    /// proxy is applied for all protocols; otherwise the config's `proxy` and
+    /// per-protocol `proxies` map are applied.
+    fn build_client(config: &FetcherConfig, proxy_override: Option<&str>) -> reqwest::Client {
         let mut builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.timeout_secs))
             .danger_accept_invalid_certs(!config.verify_ssl);
@@ -32,17 +62,39 @@ impl Fetcher {
         }
 
         // Configure proxy
-        if let Some(ref proxy_url) = config.proxy {
+        if let Some(proxy_url) = proxy_override {
             if let Ok(proxy) = reqwest::Proxy::all(proxy_url) {
                 builder = builder.proxy(proxy);
             }
+        } else {
+            if let Some(ref proxy_url) = config.proxy {
+                if let Ok(proxy) = reqwest::Proxy::all(proxy_url) {
+                    builder = builder.proxy(proxy);
+                }
+            }
+            for (scheme, proxy_url) in &config.proxies {
+                let proxy = match scheme.as_str() {
+                    "http" => reqwest::Proxy::http(proxy_url),
+                    "https" => reqwest::Proxy::https(proxy_url),
+                    _ => reqwest::Proxy::all(proxy_url),
+                };
+                if let Ok(proxy) = proxy {
+                    builder = builder.proxy(proxy);
+                }
+            }
         }
 
-        let client = builder
-            .build()
-            .expect("Failed to build reqwest client");
+        builder.build().expect("Failed to build reqwest client")
+    }
 
-        Self { config, client }
+    /// Select the client to use for the next request attempt. With rotation
+    /// enabled this advances the round-robin cursor so a failing proxy is
+    /// swapped on retry.
+    fn next_client(&self) -> &reqwest::Client {
+        match &self.rotator {
+            Some(rotator) => &self.clients[rotator.next_index()],
+            None => &self.clients[0],
+        }
     }
 
     pub async fn get(&self, url: &str) -> Result<Response, FetcherError> {
@@ -84,7 +136,7 @@ impl Fetcher {
         let mut last_error = String::new();
 
         for attempt in 0..=self.config.retries {
-            let mut req = self.client.request(method.clone(), url);
+            let mut req = self.next_client().request(method.clone(), url);
 
             // Set headers
             for (key, value) in &headers {
