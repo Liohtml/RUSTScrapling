@@ -67,18 +67,33 @@ impl Fetcher {
                 builder = builder.proxy(proxy);
             }
         } else {
-            if let Some(ref proxy_url) = config.proxy {
-                if let Ok(proxy) = reqwest::Proxy::all(proxy_url) {
+            // Apply scheme-specific proxies before any wildcard so the specific
+            // ones win (reqwest uses the first matching proxy). `proxies` is a
+            // HashMap, so iterate in a deterministic order.
+            if let Some(proxy_url) = config.proxies.get("http") {
+                if let Ok(proxy) = reqwest::Proxy::http(proxy_url) {
                     builder = builder.proxy(proxy);
                 }
             }
-            for (scheme, proxy_url) in &config.proxies {
-                let proxy = match scheme.as_str() {
-                    "http" => reqwest::Proxy::http(proxy_url),
-                    "https" => reqwest::Proxy::https(proxy_url),
-                    _ => reqwest::Proxy::all(proxy_url),
-                };
-                if let Ok(proxy) = proxy {
+            if let Some(proxy_url) = config.proxies.get("https") {
+                if let Ok(proxy) = reqwest::Proxy::https(proxy_url) {
+                    builder = builder.proxy(proxy);
+                }
+            }
+            let mut wildcard_keys: Vec<&String> = config
+                .proxies
+                .keys()
+                .filter(|k| k.as_str() != "http" && k.as_str() != "https")
+                .collect();
+            wildcard_keys.sort();
+            for key in wildcard_keys {
+                if let Ok(proxy) = reqwest::Proxy::all(&config.proxies[key]) {
+                    builder = builder.proxy(proxy);
+                }
+            }
+            // Single wildcard proxy applied last as a general fallback.
+            if let Some(ref proxy_url) = config.proxy {
+                if let Ok(proxy) = reqwest::Proxy::all(proxy_url) {
                     builder = builder.proxy(proxy);
                 }
             }

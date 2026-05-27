@@ -174,10 +174,8 @@ impl Selector {
                         parts.push(s.to_string());
                     }
                 }
-                Node::Element(ref el) => {
-                    if !ignore_tags.contains(el.name()) {
-                        self.collect_text_recursive(child, ignore_tags, valid_values, parts);
-                    }
+                Node::Element(ref el) if !ignore_tags.contains(el.name()) => {
+                    self.collect_text_recursive(child, ignore_tags, valid_values, parts);
                 }
                 _ => {}
             }
