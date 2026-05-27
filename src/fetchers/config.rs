@@ -79,11 +79,10 @@ impl FetcherConfig {
                 .entry("accept-encoding".to_string())
                 .or_insert_with(|| constants::ACCEPT_ENCODING.to_string());
 
-            headers
-                .entry("sec-ch-ua".to_string())
-                .or_insert_with(|| {
-                    "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"".to_string()
-                });
+            headers.entry("sec-ch-ua".to_string()).or_insert_with(|| {
+                "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\""
+                    .to_string()
+            });
 
             headers
                 .entry("sec-ch-ua-mobile".to_string())
@@ -179,7 +178,9 @@ impl FetcherConfigBuilder {
 
     /// Add a per-header override.  Key is lowercased automatically.
     pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.inner.headers.insert(key.into().to_lowercase(), value.into());
+        self.inner
+            .headers
+            .insert(key.into().to_lowercase(), value.into());
         self
     }
 

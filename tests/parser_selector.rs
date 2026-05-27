@@ -291,8 +291,7 @@ fn test_selectors_get_first() {
     assert_eq!(first.unwrap().as_str(), "Item 1");
 
     let empty = sel.css("div.nonexistent");
-    let fallback =
-        empty.get_first(Some(rust_scrapling::core::TextHandler::new("default")));
+    let fallback = empty.get_first(Some(rust_scrapling::core::TextHandler::new("default")));
     assert_eq!(fallback.unwrap().as_str(), "default");
 }
 

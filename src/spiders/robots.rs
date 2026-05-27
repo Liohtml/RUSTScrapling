@@ -52,7 +52,10 @@ impl RobotsTxtManager {
     }
 
     pub fn is_allowed(&self, url: &str) -> bool {
-        let domain = match Url::parse(url).ok().and_then(|u| u.host_str().map(|h| h.to_string())) {
+        let domain = match Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_string()))
+        {
             Some(d) => d,
             None => return true,
         };
@@ -95,7 +98,10 @@ impl RobotsTxtManager {
                 continue;
             }
 
-            if let Some(rest) = line.strip_prefix("User-agent:").or_else(|| line.strip_prefix("user-agent:")) {
+            if let Some(rest) = line
+                .strip_prefix("User-agent:")
+                .or_else(|| line.strip_prefix("user-agent:"))
+            {
                 let agent = rest.trim().to_lowercase();
                 if agent == ua_lower || agent == "*" {
                     // Prefer specific match over wildcard
@@ -114,12 +120,18 @@ impl RobotsTxtManager {
                     in_matching_section = false;
                 }
             } else if in_matching_section {
-                if let Some(path) = line.strip_prefix("Disallow:").or_else(|| line.strip_prefix("disallow:")) {
+                if let Some(path) = line
+                    .strip_prefix("Disallow:")
+                    .or_else(|| line.strip_prefix("disallow:"))
+                {
                     let path = path.trim();
                     if !path.is_empty() {
                         disallowed.push(path.to_string());
                     }
-                } else if let Some(delay) = line.strip_prefix("Crawl-delay:").or_else(|| line.strip_prefix("crawl-delay:")) {
+                } else if let Some(delay) = line
+                    .strip_prefix("Crawl-delay:")
+                    .or_else(|| line.strip_prefix("crawl-delay:"))
+                {
                     if let Ok(d) = delay.trim().parse::<f64>() {
                         crawl_delay = Some(d);
                     }

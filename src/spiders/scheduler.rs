@@ -1,5 +1,5 @@
-use std::collections::{BinaryHeap, HashSet};
 use super::request::SpiderRequest;
+use std::collections::{BinaryHeap, HashSet};
 
 pub struct Scheduler {
     queue: BinaryHeap<SpiderRequest>,
@@ -22,7 +22,11 @@ impl Scheduler {
 
     /// Enqueue a request. Returns true if accepted, false if duplicate.
     pub fn enqueue(&mut self, mut request: SpiderRequest) -> bool {
-        request.update_fingerprint(self.include_kwargs, self.include_headers, self.keep_fragments);
+        request.update_fingerprint(
+            self.include_kwargs,
+            self.include_headers,
+            self.keep_fragments,
+        );
 
         if !request.dont_filter() {
             let fp = request.fingerprint().to_string();

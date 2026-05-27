@@ -47,7 +47,10 @@ fn builder_overrides_defaults() {
     assert!(!cfg.stealthy_headers);
     assert!(!cfg.follow_redirects);
     assert!(!cfg.verify_ssl);
-    assert_eq!(cfg.headers.get("x-custom").map(|s| s.as_str()), Some("value"));
+    assert_eq!(
+        cfg.headers.get("x-custom").map(|s| s.as_str()),
+        Some("value")
+    );
 }
 
 #[test]
@@ -68,20 +71,40 @@ fn stealth_headers_contain_required_fields() {
     let cfg = FetcherConfig::default();
     let headers = cfg.build_headers("https://example.com", true);
 
-    assert!(headers.contains_key("user-agent"), "user-agent must be present");
+    assert!(
+        headers.contains_key("user-agent"),
+        "user-agent must be present"
+    );
     assert!(headers.contains_key("accept"), "accept must be present");
-    assert!(headers.contains_key("accept-language"), "accept-language must be present");
-    assert!(headers.contains_key("accept-encoding"), "accept-encoding must be present");
-    assert!(headers.contains_key("sec-fetch-dest"), "sec-fetch-dest must be present");
-    assert!(headers.contains_key("sec-fetch-mode"), "sec-fetch-mode must be present");
-    assert!(headers.contains_key("sec-fetch-site"), "sec-fetch-site must be present");
+    assert!(
+        headers.contains_key("accept-language"),
+        "accept-language must be present"
+    );
+    assert!(
+        headers.contains_key("accept-encoding"),
+        "accept-encoding must be present"
+    );
+    assert!(
+        headers.contains_key("sec-fetch-dest"),
+        "sec-fetch-dest must be present"
+    );
+    assert!(
+        headers.contains_key("sec-fetch-mode"),
+        "sec-fetch-mode must be present"
+    );
+    assert!(
+        headers.contains_key("sec-fetch-site"),
+        "sec-fetch-site must be present"
+    );
 }
 
 #[test]
 fn stealth_user_agent_is_non_empty() {
     let cfg = FetcherConfig::default();
     let headers = cfg.build_headers("https://example.com", true);
-    let ua = headers.get("user-agent").expect("user-agent header missing");
+    let ua = headers
+        .get("user-agent")
+        .expect("user-agent header missing");
     assert!(!ua.is_empty());
 }
 
@@ -156,7 +179,9 @@ fn proxy_rotator_round_robin() {
 
 #[test]
 fn proxy_rotator_random_stays_in_bounds() {
-    let proxies: Vec<String> = (0..5).map(|i| format!("http://proxy{}.example.com", i)).collect();
+    let proxies: Vec<String> = (0..5)
+        .map(|i| format!("http://proxy{}.example.com", i))
+        .collect();
     let rotator = ProxyRotator::new(proxies).expect("should create rotator");
 
     for _ in 0..20 {
@@ -167,7 +192,10 @@ fn proxy_rotator_random_stays_in_bounds() {
 
 #[test]
 fn proxy_rotator_len() {
-    let proxies = vec!["http://a.example.com".to_string(), "http://b.example.com".to_string()];
+    let proxies = vec![
+        "http://a.example.com".to_string(),
+        "http://b.example.com".to_string(),
+    ];
     let rotator = ProxyRotator::new(proxies).unwrap();
     assert_eq!(rotator.len(), 2);
     assert!(!rotator.is_empty());
@@ -197,8 +225,14 @@ fn builder_protocol_proxy_populates_map() {
         .protocol_proxy("HTTP", "http://p1.example.com")
         .protocol_proxy("https", "http://p2.example.com")
         .build();
-    assert_eq!(cfg.proxies.get("http").map(|s| s.as_str()), Some("http://p1.example.com"));
-    assert_eq!(cfg.proxies.get("https").map(|s| s.as_str()), Some("http://p2.example.com"));
+    assert_eq!(
+        cfg.proxies.get("http").map(|s| s.as_str()),
+        Some("http://p1.example.com")
+    );
+    assert_eq!(
+        cfg.proxies.get("https").map(|s| s.as_str()),
+        Some("http://p2.example.com")
+    );
 }
 
 #[test]
@@ -206,7 +240,10 @@ fn builder_rotating_proxies_populates_list() {
     let cfg = FetcherConfig::builder()
         .rotating_proxies(vec!["http://p1.example.com", "http://p2.example.com"])
         .build();
-    assert_eq!(cfg.proxy_list, vec!["http://p1.example.com", "http://p2.example.com"]);
+    assert_eq!(
+        cfg.proxy_list,
+        vec!["http://p1.example.com", "http://p2.example.com"]
+    );
 }
 
 #[test]

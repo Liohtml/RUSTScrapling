@@ -182,8 +182,7 @@ impl Fetcher {
                 Err(e) => {
                     last_error = e.to_string();
                     if attempt < self.config.retries {
-                        tokio::time::sleep(Duration::from_secs(self.config.retry_delay_secs))
-                            .await;
+                        tokio::time::sleep(Duration::from_secs(self.config.retry_delay_secs)).await;
                     }
                 }
             }

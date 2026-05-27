@@ -38,9 +38,15 @@ fn test_dont_filter_bypasses_dedup() {
 #[test]
 fn test_priority_ordering() {
     let mut sched = Scheduler::new(false, false, false);
-    let low = SpiderRequest::builder("https://example.com/low").priority(1).build();
-    let high = SpiderRequest::builder("https://example.com/high").priority(10).build();
-    let mid = SpiderRequest::builder("https://example.com/mid").priority(5).build();
+    let low = SpiderRequest::builder("https://example.com/low")
+        .priority(1)
+        .build();
+    let high = SpiderRequest::builder("https://example.com/high")
+        .priority(10)
+        .build();
+    let mid = SpiderRequest::builder("https://example.com/mid")
+        .priority(5)
+        .build();
 
     sched.enqueue(low);
     sched.enqueue(high);

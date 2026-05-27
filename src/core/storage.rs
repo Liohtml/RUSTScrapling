@@ -53,9 +53,8 @@ impl SqliteStorage {
     ) -> Result<Option<HashMap<String, serde_json::Value>>, StorageError> {
         let hash = Self::get_hash(identifier);
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT element_data FROM storage WHERE url = ?1 AND identifier = ?2",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT element_data FROM storage WHERE url = ?1 AND identifier = ?2")?;
         let result: Option<String> = stmt
             .query_row(params![self.url, hash], |row| row.get(0))
             .ok();

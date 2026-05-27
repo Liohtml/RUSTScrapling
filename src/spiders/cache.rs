@@ -30,8 +30,7 @@ impl ResponseCache {
 
     pub fn put(&self, url: &str, response: &CachedResponse) -> Result<(), std::io::Error> {
         let file_path = self.cache_path(url);
-        let data = serde_json::to_string_pretty(response)
-            .map_err(std::io::Error::other)?;
+        let data = serde_json::to_string_pretty(response).map_err(std::io::Error::other)?;
         std::fs::write(&file_path, data)
     }
 

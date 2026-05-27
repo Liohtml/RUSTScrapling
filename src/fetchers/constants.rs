@@ -1,6 +1,14 @@
 pub const BLOCKED_RESOURCE_TYPES: &[&str] = &[
-    "font", "image", "media", "beacon", "object", "imageset",
-    "texttrack", "websocket", "csp_report", "stylesheet",
+    "font",
+    "image",
+    "media",
+    "beacon",
+    "object",
+    "imageset",
+    "texttrack",
+    "websocket",
+    "csp_report",
+    "stylesheet",
 ];
 
 pub const USER_AGENTS: &[&str] = &[

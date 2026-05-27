@@ -96,7 +96,10 @@ impl Selector {
     /// Return the element's attributes as an AttributesHandler.
     pub fn attrib(&self) -> AttributesHandler {
         if let Some(el) = self.element_ref() {
-            let attrs = el.value().attrs().map(|(k, v)| (k.to_string(), v.to_string()));
+            let attrs = el
+                .value()
+                .attrs()
+                .map(|(k, v)| (k.to_string(), v.to_string()));
             AttributesHandler::new(attrs)
         } else {
             AttributesHandler::new(std::iter::empty::<(String, String)>())

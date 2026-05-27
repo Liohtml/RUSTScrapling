@@ -1,6 +1,6 @@
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use url::Url;
 
 #[derive(Debug, Clone)]
@@ -87,7 +87,9 @@ impl SpiderRequest {
     }
 
     pub fn domain(&self) -> Option<String> {
-        Url::parse(&self.url).ok().and_then(|u| u.host_str().map(|h| h.to_string()))
+        Url::parse(&self.url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_string()))
     }
 
     // Setters
@@ -113,7 +115,8 @@ impl SpiderRequest {
         include_headers: bool,
         keep_fragments: bool,
     ) {
-        self.fingerprint = self.compute_fingerprint(include_kwargs, include_headers, keep_fragments);
+        self.fingerprint =
+            self.compute_fingerprint(include_kwargs, include_headers, keep_fragments);
     }
 
     fn compute_fingerprint(

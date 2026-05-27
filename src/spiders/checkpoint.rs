@@ -15,13 +15,14 @@ impl CheckpointManager {
     pub fn new(dir: &str) -> Result<Self, std::io::Error> {
         let path = PathBuf::from(dir);
         std::fs::create_dir_all(&path)?;
-        Ok(Self { checkpoint_dir: path })
+        Ok(Self {
+            checkpoint_dir: path,
+        })
     }
 
     pub fn save(&self, data: &CheckpointData) -> Result<(), std::io::Error> {
         let file_path = self.checkpoint_dir.join("checkpoint.json");
-        let json = serde_json::to_string_pretty(data)
-            .map_err(std::io::Error::other)?;
+        let json = serde_json::to_string_pretty(data).map_err(std::io::Error::other)?;
         std::fs::write(file_path, json)
     }
 

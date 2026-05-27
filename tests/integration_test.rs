@@ -1,6 +1,6 @@
-use rust_scrapling::parser::Selector;
 use rust_scrapling::core::text_handler::TextHandler;
 use rust_scrapling::fetchers::response::Response;
+use rust_scrapling::parser::Selector;
 use std::collections::HashMap;
 
 const ECOMMERCE_HTML: &str = r#"
@@ -254,7 +254,11 @@ fn test_response_struct_integration() {
 fn test_selectors_getall() {
     let sel = Selector::from_html(ECOMMERCE_HTML);
     let names = sel.css("h2.product-name");
-    let all_text: Vec<String> = names.getall().iter().map(|t| t.as_str().to_string()).collect();
+    let all_text: Vec<String> = names
+        .getall()
+        .iter()
+        .map(|t| t.as_str().to_string())
+        .collect();
     assert_eq!(all_text, vec!["Laptop Pro", "Wireless Mouse", "USB-C Hub"]);
 }
 
