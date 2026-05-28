@@ -15,6 +15,27 @@ use crate::spiders::scheduler::Scheduler;
 use crate::spiders::session::SessionManager;
 use crate::spiders::spider::Spider;
 
+/// Sanitize a string for safe use as a single filesystem path segment.
+/// Replaces any character that is not alphanumeric, `_`, or `-` with `_` so
+/// values like `"../etc"` cannot escape the intended directory.
+fn sanitize_path_segment(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "_".to_string()
+    } else {
+        cleaned
+    }
+}
+
 pub struct CrawlerEngine<S: Spider> {
     spider: Arc<S>,
     session_manager: Arc<SessionManager>,
@@ -48,7 +69,9 @@ impl<S: Spider> CrawlerEngine<S> {
         let cache = if spider.development_mode() {
             let dir = crawl_dir
                 .map(|d| format!("{}/cache", d))
-                .unwrap_or_else(|| format!(".scrapling/{}/cache", spider.name()));
+                .unwrap_or_else(|| {
+                    format!(".scrapling/{}/cache", sanitize_path_segment(spider.name()))
+                });
             ResponseCache::new(&dir).ok().map(Arc::new)
         } else {
             None
@@ -57,7 +80,12 @@ impl<S: Spider> CrawlerEngine<S> {
         let checkpoint = {
             let dir = crawl_dir
                 .map(|d| format!("{}/checkpoints", d))
-                .unwrap_or_else(|| format!(".scrapling/{}/checkpoints", spider.name()));
+                .unwrap_or_else(|| {
+                    format!(
+                        ".scrapling/{}/checkpoints",
+                        sanitize_path_segment(spider.name())
+                    )
+                });
             CheckpointManager::new(&dir).ok().map(Arc::new)
         };
 
@@ -270,11 +298,14 @@ impl<S: Spider> CrawlerEngine<S> {
             }
         }
 
-        // Check allowed_domains
+        // Check allowed_domains. Reject requests whose domain cannot be
+        // parsed (e.g. `data:`, `file://`, malformed URLs) so the whitelist
+        // cannot be bypassed by non-HTTP schemes.
         let allowed = spider.allowed_domains();
         if !allowed.is_empty() {
-            if let Some(domain) = request.domain() {
-                if !allowed.contains(&domain) {
+            match request.domain() {
+                Some(domain) if allowed.contains(&domain) => {}
+                _ => {
                     stats.lock().await.offsite_requests_count += 1;
                     return;
                 }
@@ -396,5 +427,29 @@ impl<S: Spider> CrawlerEngine<S> {
                 sched.enqueue(req);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_path_segment_replaces_traversal_chars() {
+        assert_eq!(sanitize_path_segment("../etc/passwd"), "___etc_passwd");
+        assert_eq!(sanitize_path_segment("..\\windows"), "___windows");
+        assert_eq!(sanitize_path_segment("spider.name"), "spider_name");
+    }
+
+    #[test]
+    fn sanitize_path_segment_keeps_safe_chars() {
+        assert_eq!(sanitize_path_segment("my-spider_1"), "my-spider_1");
+        assert_eq!(sanitize_path_segment("Spider123"), "Spider123");
+    }
+
+    #[test]
+    fn sanitize_path_segment_handles_empty() {
+        assert_eq!(sanitize_path_segment(""), "_");
+        assert_eq!(sanitize_path_segment("///"), "___");
     }
 }
