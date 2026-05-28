@@ -28,8 +28,14 @@ impl ProxyRotator {
 
     /// Return the next proxy in round-robin order.
     pub fn next(&self) -> &str {
-        let idx = self.cursor.fetch_add(1, Ordering::Relaxed) % self.proxies.len();
-        &self.proxies[idx]
+        &self.proxies[self.next_index()]
+    }
+
+    /// Advance the cursor and return the index of the next proxy in
+    /// round-robin order. Useful for indexing a parallel collection (e.g. a
+    /// pool of pre-built HTTP clients) that shares the rotator's ordering.
+    pub fn next_index(&self) -> usize {
+        self.cursor.fetch_add(1, Ordering::Relaxed) % self.proxies.len()
     }
 
     /// Return a pseudo-random proxy based on the current cursor position.

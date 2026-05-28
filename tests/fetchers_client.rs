@@ -137,7 +137,9 @@ async fn test_fetcher_get() {
 async fn test_fetcher_post_json() {
     let fetcher = Fetcher::new(FetcherConfig::default());
     let body = serde_json::json!({"key": "value"});
-    let response = fetcher.post("https://httpbin.org/post", None, Some(&body)).await;
+    let response = fetcher
+        .post("https://httpbin.org/post", None, Some(&body))
+        .await;
     assert!(response.is_ok());
     let resp = response.unwrap();
     assert_eq!(resp.status(), 200);

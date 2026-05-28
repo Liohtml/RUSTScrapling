@@ -20,7 +20,10 @@ fn test_save_and_retrieve_roundtrip() {
     let result = storage.retrieve("elem1").unwrap();
     assert!(result.is_some());
     let retrieved = result.unwrap();
-    assert_eq!(retrieved.get("tag"), Some(&serde_json::Value::String("div".to_string())));
+    assert_eq!(
+        retrieved.get("tag"),
+        Some(&serde_json::Value::String("div".to_string()))
+    );
 }
 
 #[test]
@@ -46,7 +49,10 @@ fn test_update_existing_second_value_wins() {
     storage.save("elem1", &second).unwrap();
 
     let result = storage.retrieve("elem1").unwrap().unwrap();
-    assert_eq!(result.get("class"), Some(&serde_json::Value::String("new-class".to_string())));
+    assert_eq!(
+        result.get("class"),
+        Some(&serde_json::Value::String("new-class".to_string()))
+    );
 }
 
 #[test]
@@ -67,7 +73,10 @@ fn test_different_urls_isolate_data() {
     // site-a should still see its own data
     let result_a = storage_a.retrieve("elem1").unwrap();
     assert!(result_a.is_some());
-    assert_eq!(result_a.unwrap().get("src"), Some(&serde_json::Value::String("site-a-value".to_string())));
+    assert_eq!(
+        result_a.unwrap().get("src"),
+        Some(&serde_json::Value::String("site-a-value".to_string()))
+    );
 }
 
 #[test]
@@ -84,6 +93,12 @@ fn test_different_identifiers_dont_collide() {
     let result1 = storage.retrieve("identifier_one").unwrap().unwrap();
     let result2 = storage.retrieve("identifier_two").unwrap().unwrap();
 
-    assert_eq!(result1.get("id"), Some(&serde_json::Value::String("first".to_string())));
-    assert_eq!(result2.get("id"), Some(&serde_json::Value::String("second".to_string())));
+    assert_eq!(
+        result1.get("id"),
+        Some(&serde_json::Value::String("first".to_string()))
+    );
+    assert_eq!(
+        result2.get("id"),
+        Some(&serde_json::Value::String("second".to_string()))
+    );
 }

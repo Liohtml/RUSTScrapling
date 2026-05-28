@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, Semaphore};
 use url::Url;
@@ -125,7 +125,10 @@ impl<S: Spider> CrawlerEngine<S> {
             let start_urls = self.spider.start_urls();
             let mut domains_seen = std::collections::HashSet::new();
             for url in &start_urls {
-                if let Some(domain) = Url::parse(url).ok().and_then(|u| u.host_str().map(|h| h.to_string())) {
+                if let Some(domain) = Url::parse(url)
+                    .ok()
+                    .and_then(|u| u.host_str().map(|h| h.to_string()))
+                {
                     if domains_seen.insert(domain.clone()) {
                         robots.lock().await.fetch_robots(&domain).await;
                     }

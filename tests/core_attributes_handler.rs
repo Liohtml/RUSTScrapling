@@ -64,7 +64,10 @@ fn test_keys_iteration() {
 fn test_values_iteration() {
     let attrs = make_attrs();
     let values: Vec<&str> = attrs.values().map(|v| v.as_str()).collect();
-    assert_eq!(values, vec!["btn primary", "submit-btn", "https://example.com", "42"]);
+    assert_eq!(
+        values,
+        vec!["btn primary", "submit-btn", "https://example.com", "42"]
+    );
 }
 
 #[test]

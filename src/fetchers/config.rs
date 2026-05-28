@@ -12,6 +12,10 @@ pub struct FetcherConfig {
     pub verify_ssl: bool,
     pub proxy: Option<String>,
     pub proxies: HashMap<String, String>,
+    /// Proxy URLs to rotate through, one HTTP client is built per entry and
+    /// selected round-robin per request. Takes precedence over `proxy` /
+    /// `proxies` when non-empty.
+    pub proxy_list: Vec<String>,
     pub headers: HashMap<String, String>,
     pub stealthy_headers: bool,
     pub user_agent: Option<String>,
@@ -28,6 +32,7 @@ impl Default for FetcherConfig {
             verify_ssl: true,
             proxy: None,
             proxies: HashMap::new(),
+            proxy_list: Vec::new(),
             headers: HashMap::new(),
             stealthy_headers: true,
             user_agent: None,
@@ -74,11 +79,10 @@ impl FetcherConfig {
                 .entry("accept-encoding".to_string())
                 .or_insert_with(|| constants::ACCEPT_ENCODING.to_string());
 
-            headers
-                .entry("sec-ch-ua".to_string())
-                .or_insert_with(|| {
-                    "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"".to_string()
-                });
+            headers.entry("sec-ch-ua".to_string()).or_insert_with(|| {
+                "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\""
+                    .to_string()
+            });
 
             headers
                 .entry("sec-ch-ua-mobile".to_string())
@@ -147,9 +151,36 @@ impl FetcherConfigBuilder {
         self
     }
 
+    /// Set a per-protocol proxy override. The scheme is lowercased; `"http"`
+    /// and `"https"` are routed to their respective protocols, any other key
+    /// (e.g. `"all"`) applies to all protocols.
+    pub fn protocol_proxy(
+        mut self,
+        scheme: impl Into<String>,
+        proxy_url: impl Into<String>,
+    ) -> Self {
+        self.inner
+            .proxies
+            .insert(scheme.into().to_lowercase(), proxy_url.into());
+        self
+    }
+
+    /// Set the list of proxies to rotate through. When non-empty, requests are
+    /// distributed round-robin across one HTTP client per proxy.
+    pub fn rotating_proxies<I, S>(mut self, proxies: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.inner.proxy_list = proxies.into_iter().map(Into::into).collect();
+        self
+    }
+
     /// Add a per-header override.  Key is lowercased automatically.
     pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.inner.headers.insert(key.into().to_lowercase(), value.into());
+        self.inner
+            .headers
+            .insert(key.into().to_lowercase(), value.into());
         self
     }
 

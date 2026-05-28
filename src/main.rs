@@ -36,7 +36,12 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Fetch { url, selector, format, no_stealth } => {
+        Commands::Fetch {
+            url,
+            selector,
+            format,
+            no_stealth,
+        } => {
             let config = FetcherConfig::builder().stealth(!no_stealth).build();
             let fetcher = Fetcher::new(config);
             match fetcher.get(&url).await {
@@ -64,12 +69,18 @@ async fn main() {
                             "html" => println!("{}", response.text()),
                             _ => {
                                 let sel = response.selector();
-                                println!("{}", sel.get_all_text("\n", true, &["script", "style"], None));
+                                println!(
+                                    "{}",
+                                    sel.get_all_text("\n", true, &["script", "style"], None)
+                                );
                             }
                         }
                     }
                 }
-                Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
         Commands::Extract { url, selector } => {
@@ -79,12 +90,20 @@ async fn main() {
                     let sel = response.selector();
                     if let Some(css) = selector {
                         let results = sel.css(&css);
-                        for item in &results { println!("{}", item.text()); }
+                        for item in &results {
+                            println!("{}", item.text());
+                        }
                     } else {
-                        println!("{}", sel.get_all_text("\n", true, &["script", "style"], None));
+                        println!(
+                            "{}",
+                            sel.get_all_text("\n", true, &["script", "style"], None)
+                        );
                     }
                 }
-                Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
     }

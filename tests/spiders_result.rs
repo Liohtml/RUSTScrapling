@@ -1,4 +1,4 @@
-use rust_scrapling::spiders::result::{CrawlStats, CrawlResult, ItemList};
+use rust_scrapling::spiders::result::{CrawlResult, CrawlStats, ItemList};
 use std::time::Instant;
 
 #[test]

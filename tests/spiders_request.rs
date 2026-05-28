@@ -68,8 +68,12 @@ fn test_domain() {
 
 #[test]
 fn test_ordering() {
-    let low = SpiderRequest::builder("https://example.com/low").priority(1).build();
-    let high = SpiderRequest::builder("https://example.com/high").priority(10).build();
+    let low = SpiderRequest::builder("https://example.com/low")
+        .priority(1)
+        .build();
+    let high = SpiderRequest::builder("https://example.com/high")
+        .priority(10)
+        .build();
     assert!(high > low);
 }
 
