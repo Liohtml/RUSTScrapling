@@ -68,6 +68,13 @@ impl Selector {
 
     /// Return the tag name of this element.
     /// Returns "html" for the document root, "#text" for text nodes.
+    /// Stable identity of the underlying DOM node. Useful for comparing two
+    /// `Selector`s that reference the same node without resorting to HTML
+    /// string equality (which is ambiguous for identical siblings).
+    pub fn node_id(&self) -> NodeId {
+        self.node_id
+    }
+
     pub fn tag(&self) -> &str {
         let node = self.node_ref();
         match node.value() {
