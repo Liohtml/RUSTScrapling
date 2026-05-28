@@ -22,6 +22,13 @@ pub enum FetcherError {
 
 impl Fetcher {
     pub fn new(config: FetcherConfig) -> Self {
+        if !config.verify_ssl {
+            log::warn!(
+                "SSL certificate verification is DISABLED. This is insecure \
+                 and must not be used in production."
+            );
+        }
+
         let (clients, rotator) = if config.proxy_list.is_empty() {
             // No rotation: a single client honouring `proxy` and the
             // per-protocol `proxies` map.
@@ -166,7 +173,7 @@ impl Fetcher {
             }
 
             match req.send().await {
-                Ok(resp) => {
+                Ok(mut resp) => {
                     let status_code = resp.status().as_u16();
                     let final_url = resp.url().to_string();
 
@@ -184,7 +191,37 @@ impl Fetcher {
                         .cloned()
                         .unwrap_or_default();
 
-                    let body_text = resp.text().await.unwrap_or_default();
+                    // Reject obviously-too-large bodies up front when the
+                    // server advertised a Content-Length.
+                    let max_body = self.config.max_body_bytes;
+                    if let Some(len) = resp.content_length() {
+                        if len as usize > max_body {
+                            return Err(FetcherError::RequestFailed(format!(
+                                "response body too large: {} bytes (max {})",
+                                len, max_body
+                            )));
+                        }
+                    }
+
+                    // Stream the body and cap the accumulated size so a
+                    // server that lies about (or omits) Content-Length still
+                    // cannot exhaust memory.
+                    let mut bytes: Vec<u8> = Vec::new();
+                    let mut overflow = false;
+                    while let Ok(Some(chunk)) = resp.chunk().await {
+                        if bytes.len() + chunk.len() > max_body {
+                            overflow = true;
+                            break;
+                        }
+                        bytes.extend_from_slice(&chunk);
+                    }
+                    if overflow {
+                        return Err(FetcherError::RequestFailed(format!(
+                            "response body exceeded {} bytes",
+                            max_body
+                        )));
+                    }
+                    let body_text = String::from_utf8_lossy(&bytes).into_owned();
 
                     return Ok(Response::new(
                         status_code,
