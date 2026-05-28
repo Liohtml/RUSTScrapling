@@ -38,7 +38,7 @@ impl SqliteStorage {
     ) -> Result<(), StorageError> {
         let hash = Self::get_hash(identifier);
         let json = serde_json::to_string(data)?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT OR REPLACE INTO storage (url, identifier, element_data) VALUES (?1, ?2, ?3)",
             params![self.url, hash, json],
@@ -52,7 +52,7 @@ impl SqliteStorage {
         identifier: &str,
     ) -> Result<Option<HashMap<String, serde_json::Value>>, StorageError> {
         let hash = Self::get_hash(identifier);
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt =
             conn.prepare("SELECT element_data FROM storage WHERE url = ?1 AND identifier = ?2")?;
         let result: Option<String> = stmt

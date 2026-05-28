@@ -102,3 +102,38 @@ fn test_different_identifiers_dont_collide() {
         Some(&serde_json::Value::String("second".to_string()))
     );
 }
+
+#[test]
+fn test_save_works_after_mutex_poisoning() {
+    // Trigger a panic in a thread while it holds the storage mutex,
+    // then verify that subsequent calls still succeed instead of panicking
+    // on the poisoned lock.
+    use std::sync::Arc;
+    use std::thread;
+
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("storage.db");
+    let storage =
+        Arc::new(SqliteStorage::new(db.to_str().unwrap(), "https://example.com").unwrap());
+
+    // Poison the mutex by panicking from a thread that uses it.
+    let s = storage.clone();
+    let _ = thread::spawn(move || {
+        let _ignored = s.save("poison", &make_data("k", "v"));
+        panic!("intentional poisoning");
+    })
+    .join();
+
+    // The mutex is now poisoned. Storage must still be usable.
+    let data = make_data("after", "ok");
+    storage
+        .save("after-poison", &data)
+        .expect("save should recover from poisoned mutex");
+    let got = storage
+        .retrieve("after-poison")
+        .expect("retrieve should recover from poisoned mutex");
+    assert_eq!(
+        got.unwrap().get("after").cloned(),
+        Some(serde_json::Value::String("ok".to_string()))
+    );
+}
