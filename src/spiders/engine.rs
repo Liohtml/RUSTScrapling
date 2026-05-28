@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
 use url::Url;
 
@@ -22,6 +23,9 @@ pub struct CrawlerEngine<S: Spider> {
     stats: Arc<Mutex<CrawlStats>>,
     items: Arc<Mutex<ItemList>>,
     global_limiter: Arc<Semaphore>,
+    /// Per-domain semaphores, lazily created on first request to each host.
+    /// Used to enforce `Spider::concurrent_requests_per_domain`.
+    domain_limiters: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     robots_manager: Option<Arc<Mutex<RobotsTxtManager>>>,
     cache: Option<Arc<ResponseCache>>,
     checkpoint: Option<Arc<CheckpointManager>>,
@@ -74,6 +78,7 @@ impl<S: Spider> CrawlerEngine<S> {
             stats: Arc::new(Mutex::new(CrawlStats::default())),
             items: Arc::new(Mutex::new(ItemList::new())),
             global_limiter: Arc::new(Semaphore::new(concurrent as usize)),
+            domain_limiters: Arc::new(Mutex::new(HashMap::new())),
             robots_manager,
             cache,
             checkpoint,
@@ -164,6 +169,23 @@ impl<S: Spider> CrawlerEngine<S> {
                     }
                     let permit = permit.unwrap();
 
+                    // Acquire a per-domain permit when a per-domain cap is
+                    // configured, so a single host cannot exceed it.
+                    let per_domain = self.spider.concurrent_requests_per_domain();
+                    let domain_permit = if per_domain > 0 {
+                        let domain = req.domain().unwrap_or_default();
+                        let sem = {
+                            let mut limiters = self.domain_limiters.lock().await;
+                            limiters
+                                .entry(domain)
+                                .or_insert_with(|| Arc::new(Semaphore::new(per_domain as usize)))
+                                .clone()
+                        };
+                        sem.acquire_owned().await.ok()
+                    } else {
+                        None
+                    };
+
                     self.active_tasks.fetch_add(1, Ordering::SeqCst);
 
                     let spider = self.spider.clone();
@@ -189,6 +211,7 @@ impl<S: Spider> CrawlerEngine<S> {
                         .await;
 
                         active_tasks.fetch_sub(1, Ordering::SeqCst);
+                        drop(domain_permit);
                         drop(permit);
                     });
                 }
@@ -203,9 +226,13 @@ impl<S: Spider> CrawlerEngine<S> {
             }
         }
 
-        // On pause, save checkpoint
+        // On pause, save checkpoint — but first wait for in-flight tasks to
+        // finish so any URLs they enqueue are included in the persisted state.
         let was_paused = self.paused.load(Ordering::SeqCst);
         if was_paused {
+            while self.active_tasks.load(Ordering::SeqCst) > 0 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
             if let Some(ref cp) = self.checkpoint {
                 let sched = self.scheduler.lock().await;
                 let pending_urls: Vec<String> = sched
