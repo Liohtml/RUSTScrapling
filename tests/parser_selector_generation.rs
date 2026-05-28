@@ -51,3 +51,47 @@ fn test_full_css_selector_includes_body() {
         css
     );
 }
+
+#[test]
+fn identical_siblings_get_distinct_nth_of_type_positions() {
+    // Three <li> with identical inner content. The bug compared outer_html
+    // and returned position 1 for all of them. The fix uses NodeId.
+    let html = r#"<html><body><ul><li>Apple</li><li>Apple</li><li>Apple</li></ul></body></html>"#;
+    let sel = Selector::from_html(html);
+    let items = sel.css("li");
+    assert_eq!(items.len(), 3);
+
+    let css1 = generate_css_selector(&items[0], true);
+    let css2 = generate_css_selector(&items[1], true);
+    let css3 = generate_css_selector(&items[2], true);
+    assert!(css1.contains("nth-of-type(1)"), "got: {}", css1);
+    assert!(css2.contains("nth-of-type(2)"), "got: {}", css2);
+    assert!(css3.contains("nth-of-type(3)"), "got: {}", css3);
+
+    let xp1 = generate_xpath_selector(&items[0], true);
+    let xp2 = generate_xpath_selector(&items[1], true);
+    let xp3 = generate_xpath_selector(&items[2], true);
+    assert!(xp1.ends_with("li[1]"), "got: {}", xp1);
+    assert!(xp2.ends_with("li[2]"), "got: {}", xp2);
+    assert!(xp3.ends_with("li[3]"), "got: {}", xp3);
+}
+
+#[test]
+fn xpath_selector_escapes_id_with_single_quote() {
+    // Adversarial id containing a single quote. Without escaping the
+    // generated XPath would be `div[@id='foo' or '1'='1']`, which is
+    // syntactically valid but semantically attacker-controlled.
+    let html = r#"<html><body><div id="foo' or '1'='1">x</div></body></html>"#;
+    let sel = Selector::from_html(html);
+    let div = sel.css("div");
+    assert_eq!(div.len(), 1);
+    let xp = generate_xpath_selector(&div[0], false);
+    // Because the id contains a single quote, the generator switches to
+    // double-quoted delimiters; the original `'` no longer terminates the
+    // string.
+    assert!(
+        xp.contains("@id=\"foo' or '1'='1\""),
+        "expected double-quoted id literal, got: {}",
+        xp
+    );
+}
