@@ -250,3 +250,14 @@ fn builder_rotating_proxies_populates_list() {
 fn default_proxy_list_is_empty() {
     assert!(FetcherConfig::default().proxy_list.is_empty());
 }
+
+#[test]
+fn default_max_body_bytes_is_50_mib() {
+    assert_eq!(FetcherConfig::default().max_body_bytes, 50 * 1024 * 1024);
+}
+
+#[test]
+fn builder_max_body_bytes_overrides_default() {
+    let cfg = FetcherConfig::builder().max_body_bytes(1024).build();
+    assert_eq!(cfg.max_body_bytes, 1024);
+}

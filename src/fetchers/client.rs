@@ -22,6 +22,13 @@ pub enum FetcherError {
 
 impl Fetcher {
     pub fn new(config: FetcherConfig) -> Self {
+        if !config.verify_ssl {
+            log::warn!(
+                "SSL certificate verification is DISABLED. This is insecure \
+                 and must not be used in production."
+            );
+        }
+
         let (clients, rotator) = if config.proxy_list.is_empty() {
             // No rotation: a single client honouring `proxy` and the
             // per-protocol `proxies` map.
@@ -166,7 +173,7 @@ impl Fetcher {
             }
 
             match req.send().await {
-                Ok(resp) => {
+                Ok(mut resp) => {
                     let status_code = resp.status().as_u16();
                     let final_url = resp.url().to_string();
 
@@ -184,7 +191,50 @@ impl Fetcher {
                         .cloned()
                         .unwrap_or_default();
 
-                    let body_text = resp.text().await.unwrap_or_default();
+                    // Reject obviously-too-large bodies up front when the
+                    // server advertised a Content-Length. Use try_from so the
+                    // u64 -> usize cast cannot truncate on 32-bit targets.
+                    let max_body = self.config.max_body_bytes;
+                    if let Some(len) = resp.content_length() {
+                        let too_large = match usize::try_from(len) {
+                            Ok(n) => n > max_body,
+                            Err(_) => true,
+                        };
+                        if too_large {
+                            return Err(FetcherError::RequestFailed(format!(
+                                "response body too large: {} bytes (max {})",
+                                len, max_body
+                            )));
+                        }
+                    }
+
+                    // Stream the body and cap the accumulated size so a
+                    // server that lies about (or omits) Content-Length still
+                    // cannot exhaust memory. Chunk read errors surface as a
+                    // request failure rather than a truncated success.
+                    let mut bytes: Vec<u8> = Vec::new();
+                    loop {
+                        match resp.chunk().await {
+                            Ok(Some(chunk)) => {
+                                let new_len = bytes.len().checked_add(chunk.len());
+                                if new_len.map(|n| n > max_body).unwrap_or(true) {
+                                    return Err(FetcherError::RequestFailed(format!(
+                                        "response body exceeded {} bytes",
+                                        max_body
+                                    )));
+                                }
+                                bytes.extend_from_slice(&chunk);
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                return Err(FetcherError::RequestFailed(format!(
+                                    "chunk read error: {}",
+                                    e
+                                )));
+                            }
+                        }
+                    }
+                    let body_text = String::from_utf8_lossy(&bytes).into_owned();
 
                     return Ok(Response::new(
                         status_code,

@@ -19,6 +19,9 @@ pub struct FetcherConfig {
     pub headers: HashMap<String, String>,
     pub stealthy_headers: bool,
     pub user_agent: Option<String>,
+    /// Maximum response body size in bytes. Responses larger than this are
+    /// aborted to protect against OOM. Defaults to 50 MiB.
+    pub max_body_bytes: usize,
 }
 
 impl Default for FetcherConfig {
@@ -36,6 +39,7 @@ impl Default for FetcherConfig {
             headers: HashMap::new(),
             stealthy_headers: true,
             user_agent: None,
+            max_body_bytes: 50 * 1024 * 1024,
         }
     }
 }
@@ -202,6 +206,13 @@ impl FetcherConfigBuilder {
 
     pub fn verify_ssl(mut self, verify: bool) -> Self {
         self.inner.verify_ssl = verify;
+        self
+    }
+
+    /// Cap on response body size in bytes. Responses larger than this are
+    /// aborted before reading them fully into memory.
+    pub fn max_body_bytes(mut self, bytes: usize) -> Self {
+        self.inner.max_body_bytes = bytes;
         self
     }
 
