@@ -192,10 +192,15 @@ impl Fetcher {
                         .unwrap_or_default();
 
                     // Reject obviously-too-large bodies up front when the
-                    // server advertised a Content-Length.
+                    // server advertised a Content-Length. Use try_from so the
+                    // u64 -> usize cast cannot truncate on 32-bit targets.
                     let max_body = self.config.max_body_bytes;
                     if let Some(len) = resp.content_length() {
-                        if len as usize > max_body {
+                        let too_large = match usize::try_from(len) {
+                            Ok(n) => n > max_body,
+                            Err(_) => true,
+                        };
+                        if too_large {
                             return Err(FetcherError::RequestFailed(format!(
                                 "response body too large: {} bytes (max {})",
                                 len, max_body
@@ -205,21 +210,29 @@ impl Fetcher {
 
                     // Stream the body and cap the accumulated size so a
                     // server that lies about (or omits) Content-Length still
-                    // cannot exhaust memory.
+                    // cannot exhaust memory. Chunk read errors surface as a
+                    // request failure rather than a truncated success.
                     let mut bytes: Vec<u8> = Vec::new();
-                    let mut overflow = false;
-                    while let Ok(Some(chunk)) = resp.chunk().await {
-                        if bytes.len() + chunk.len() > max_body {
-                            overflow = true;
-                            break;
+                    loop {
+                        match resp.chunk().await {
+                            Ok(Some(chunk)) => {
+                                let new_len = bytes.len().checked_add(chunk.len());
+                                if new_len.map(|n| n > max_body).unwrap_or(true) {
+                                    return Err(FetcherError::RequestFailed(format!(
+                                        "response body exceeded {} bytes",
+                                        max_body
+                                    )));
+                                }
+                                bytes.extend_from_slice(&chunk);
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                return Err(FetcherError::RequestFailed(format!(
+                                    "chunk read error: {}",
+                                    e
+                                )));
+                            }
                         }
-                        bytes.extend_from_slice(&chunk);
-                    }
-                    if overflow {
-                        return Err(FetcherError::RequestFailed(format!(
-                            "response body exceeded {} bytes",
-                            max_body
-                        )));
                     }
                     let body_text = String::from_utf8_lossy(&bytes).into_owned();
 
