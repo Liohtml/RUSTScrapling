@@ -23,7 +23,11 @@ impl CheckpointManager {
     pub fn save(&self, data: &CheckpointData) -> Result<(), std::io::Error> {
         let file_path = self.checkpoint_dir.join("checkpoint.json");
         let json = serde_json::to_string_pretty(data).map_err(std::io::Error::other)?;
-        std::fs::write(file_path, json)
+        // Write atomically: write to a .tmp file then rename so a crash
+        // mid-write cannot corrupt or zero-out an existing checkpoint.
+        let tmp_path = self.checkpoint_dir.join("checkpoint.json.tmp");
+        std::fs::write(&tmp_path, &json)?;
+        std::fs::rename(&tmp_path, &file_path)
     }
 
     pub fn restore(&self) -> Option<CheckpointData> {

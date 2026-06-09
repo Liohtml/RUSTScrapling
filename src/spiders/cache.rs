@@ -31,7 +31,11 @@ impl ResponseCache {
     pub fn put(&self, url: &str, response: &CachedResponse) -> Result<(), std::io::Error> {
         let file_path = self.cache_path(url);
         let data = serde_json::to_string_pretty(response).map_err(std::io::Error::other)?;
-        std::fs::write(&file_path, data)
+        // Write atomically: serialize to a sibling .tmp file then rename so a
+        // crash mid-write cannot leave a truncated/corrupt cache entry.
+        let tmp_path = file_path.with_extension("tmp");
+        std::fs::write(&tmp_path, &data)?;
+        std::fs::rename(&tmp_path, &file_path)
     }
 
     fn cache_path(&self, url: &str) -> PathBuf {
