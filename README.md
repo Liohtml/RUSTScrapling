@@ -394,6 +394,11 @@ async fn main() {
 | `on_scraped_item(item)` | Item pipeline -- return `None` to drop |
 | `is_blocked(response)` | Custom block detection |
 
+> **Memory note:** the scheduler keeps an in-memory dedup set of one
+> fingerprint per unique URL visited (~100 MB per ~1M URLs). For very large
+> or open-ended crawls, set `allowed_domains()` to bound scope so the set does
+> not grow without limit.
+
 ---
 
 ## CLI
