@@ -37,6 +37,21 @@ fn sanitize_path_segment(name: &str) -> String {
     }
 }
 
+/// Decrements the active-task counter on drop. Using a guard (rather than an
+/// explicit `fetch_sub` after the `.await`) guarantees the counter is balanced
+/// even if `process_request` panics — otherwise the panicking task would leak
+/// a count and the crawl loop, which exits on `active_tasks == 0`, would hang
+/// forever.
+struct ActiveTaskGuard {
+    active_tasks: Arc<AtomicU32>,
+}
+
+impl Drop for ActiveTaskGuard {
+    fn drop(&mut self) {
+        self.active_tasks.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 pub struct CrawlerEngine<S: Spider> {
     spider: Arc<S>,
     session_manager: Arc<SessionManager>,
@@ -191,6 +206,16 @@ impl<S: Spider> CrawlerEngine<S> {
 
             match request {
                 Some(req) => {
+                    // Apply the spider's download delay here, in the single
+                    // dispatch loop, so it actually throttles request *rate*.
+                    // (Applying it inside each spawned task only added latency:
+                    // N concurrent tasks slept in parallel and then all fired
+                    // at once.)
+                    let delay = self.spider.download_delay();
+                    if delay > 0.0 {
+                        tokio::time::sleep(Duration::from_secs_f64(delay)).await;
+                    }
+
                     let permit = self.global_limiter.clone().acquire_owned().await;
                     if permit.is_err() {
                         break;
@@ -226,6 +251,13 @@ impl<S: Spider> CrawlerEngine<S> {
                     let active_tasks = self.active_tasks.clone();
 
                     tokio::spawn(async move {
+                        // These all release on drop — including during a panic
+                        // unwind — so the counter stays balanced and the
+                        // permits are returned even if `process_request` panics.
+                        let _task_guard = ActiveTaskGuard { active_tasks };
+                        let _permit = permit;
+                        let _domain_permit = domain_permit;
+
                         Self::process_request(
                             spider,
                             session_manager,
@@ -237,10 +269,6 @@ impl<S: Spider> CrawlerEngine<S> {
                             req,
                         )
                         .await;
-
-                        active_tasks.fetch_sub(1, Ordering::SeqCst);
-                        drop(domain_permit);
-                        drop(permit);
                     });
                 }
                 None => {
@@ -316,13 +344,22 @@ impl<S: Spider> CrawlerEngine<S> {
     ) {
         let url = request.url().to_string();
 
-        // Check robots.txt
+        // Check robots.txt. Lazily fetch robots.txt for domains discovered
+        // mid-crawl (only seed domains are pre-fetched), otherwise a follow
+        // link to a new host would bypass the Robots Exclusion Protocol.
+        let mut robots_crawl_delay: Option<f64> = None;
         if let Some(ref robots) = robots_manager {
-            let robots = robots.lock().await;
+            let domain = request.domain().unwrap_or_default();
+            let mut robots = robots.lock().await;
+            if !domain.is_empty() && !robots.has_domain(&domain) {
+                robots.fetch_robots(&domain).await;
+            }
             if !robots.is_allowed(&url) {
                 stats.lock().await.robots_disallowed_count += 1;
                 return;
             }
+            // Honor the site's Crawl-delay directive for this domain.
+            robots_crawl_delay = robots.crawl_delay(&domain);
         }
 
         // Check allowed_domains. Reject requests whose domain cannot be
@@ -363,10 +400,13 @@ impl<S: Spider> CrawlerEngine<S> {
             }
         }
 
-        // Apply download delay
-        let delay = spider.download_delay();
-        if delay > 0.0 {
-            tokio::time::sleep(std::time::Duration::from_secs_f64(delay)).await;
+        // The spider's static download_delay is applied in the dispatch loop
+        // (so it throttles rate). Here we additionally honor the per-domain
+        // Crawl-delay parsed from this host's robots.txt.
+        if let Some(d) = robots_crawl_delay {
+            if d > 0.0 {
+                tokio::time::sleep(Duration::from_secs_f64(d)).await;
+            }
         }
 
         // Fetch via session_manager

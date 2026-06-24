@@ -81,6 +81,11 @@ impl RobotsTxtManager {
         self.cache.get(domain).and_then(|r| r.crawl_delay)
     }
 
+    /// Whether robots.txt has already been fetched (cached) for this domain.
+    pub fn has_domain(&self, domain: &str) -> bool {
+        self.cache.contains_key(domain)
+    }
+
     fn parse_robots(text: &str, user_agent: &str) -> RobotsRules {
         let ua_lower = user_agent.to_lowercase();
         let groups = parse_groups(text);
