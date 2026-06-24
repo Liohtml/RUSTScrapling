@@ -21,7 +21,12 @@ pub enum FetcherError {
 }
 
 impl Fetcher {
-    pub fn new(config: FetcherConfig) -> Self {
+    /// Build a fetcher from config.
+    ///
+    /// Returns [`FetcherError::Http`] if the underlying reqwest client cannot
+    /// be built (e.g. the TLS backend fails to initialize on a misconfigured
+    /// system) rather than panicking, so callers can handle it.
+    pub fn new(config: FetcherConfig) -> Result<Self, FetcherError> {
         if !config.verify_ssl {
             log::warn!(
                 "SSL certificate verification is DISABLED. This is insecure \
@@ -32,29 +37,32 @@ impl Fetcher {
         let (clients, rotator) = if config.proxy_list.is_empty() {
             // No rotation: a single client honouring `proxy` and the
             // per-protocol `proxies` map.
-            (vec![Self::build_client(&config, None)], None)
+            (vec![Self::build_client(&config, None)?], None)
         } else {
             // Rotation: one client bound to each proxy, selected round-robin.
             let clients = config
                 .proxy_list
                 .iter()
                 .map(|p| Self::build_client(&config, Some(p)))
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             let rotator = ProxyRotator::new(config.proxy_list.clone());
             (clients, rotator)
         };
 
-        Self {
+        Ok(Self {
             config,
             clients,
             rotator,
-        }
+        })
     }
 
     /// Build a single reqwest client. When `proxy_override` is `Some`, that
     /// proxy is applied for all protocols; otherwise the config's `proxy` and
     /// per-protocol `proxies` map are applied.
-    fn build_client(config: &FetcherConfig, proxy_override: Option<&str>) -> reqwest::Client {
+    fn build_client(
+        config: &FetcherConfig,
+        proxy_override: Option<&str>,
+    ) -> Result<reqwest::Client, FetcherError> {
         let mut builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.timeout_secs))
             .danger_accept_invalid_certs(!config.verify_ssl);
@@ -106,7 +114,7 @@ impl Fetcher {
             }
         }
 
-        builder.build().expect("Failed to build reqwest client")
+        Ok(builder.build()?)
     }
 
     /// Select the client to use for the next request attempt. With rotation

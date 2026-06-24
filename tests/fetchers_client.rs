@@ -124,8 +124,8 @@ fn test_bot_block_codes_are_blocked() {
 
 #[test]
 fn test_fetcher_builds_with_default_config() {
-    // Just verify that Fetcher::new doesn't panic with default config
-    let _fetcher = Fetcher::new(FetcherConfig::default());
+    // Fetcher::new now returns Result instead of panicking on build failure.
+    assert!(Fetcher::new(FetcherConfig::default()).is_ok());
 }
 
 #[test]
@@ -138,14 +138,14 @@ fn test_fetcher_builds_with_custom_config() {
         .verify_ssl(false)
         .stealth(false)
         .build();
-    let _fetcher = Fetcher::new(config);
+    assert!(Fetcher::new(config).is_ok());
 }
 
 // Network tests (these hit httpbin.org - marked with #[ignore] so they don't run by default)
 #[tokio::test]
 #[ignore]
 async fn test_fetcher_get() {
-    let fetcher = Fetcher::new(FetcherConfig::default());
+    let fetcher = Fetcher::new(FetcherConfig::default()).unwrap();
     let response = fetcher.get("https://httpbin.org/get").await;
     assert!(response.is_ok());
     assert_eq!(response.unwrap().status(), 200);
@@ -154,7 +154,7 @@ async fn test_fetcher_get() {
 #[tokio::test]
 #[ignore]
 async fn test_fetcher_post_json() {
-    let fetcher = Fetcher::new(FetcherConfig::default());
+    let fetcher = Fetcher::new(FetcherConfig::default()).unwrap();
     let body = serde_json::json!({"key": "value"});
     let response = fetcher
         .post("https://httpbin.org/post", None, Some(&body))
@@ -167,7 +167,7 @@ async fn test_fetcher_post_json() {
 #[tokio::test]
 #[ignore]
 async fn test_fetcher_delete() {
-    let fetcher = Fetcher::new(FetcherConfig::default());
+    let fetcher = Fetcher::new(FetcherConfig::default()).unwrap();
     let response = fetcher.delete("https://httpbin.org/delete").await;
     assert!(response.is_ok());
     assert_eq!(response.unwrap().status(), 200);

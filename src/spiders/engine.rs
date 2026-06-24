@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
 use url::Url;
 
+use crate::fetchers::client::FetcherError;
 use crate::fetchers::response::Response as FetcherResponse;
 use crate::spiders::cache::{CachedResponse, ResponseCache};
 use crate::spiders::checkpoint::{CheckpointData, CheckpointManager};
@@ -74,8 +75,8 @@ impl<S: Spider> CrawlerEngine<S> {
         spider: Arc<S>,
         mut session_manager: SessionManager,
         crawl_dir: Option<&str>,
-    ) -> Self {
-        session_manager.ensure_default();
+    ) -> Result<Self, FetcherError> {
+        session_manager.ensure_default()?;
 
         let concurrent = spider.concurrent_requests().max(1);
 
@@ -114,7 +115,7 @@ impl<S: Spider> CrawlerEngine<S> {
             spider.fp_keep_fragments(),
         );
 
-        Self {
+        Ok(Self {
             spider,
             session_manager: Arc::new(session_manager),
             scheduler: Arc::new(Mutex::new(scheduler)),
@@ -127,7 +128,7 @@ impl<S: Spider> CrawlerEngine<S> {
             checkpoint,
             paused: Arc::new(AtomicBool::new(false)),
             active_tasks: Arc::new(AtomicU32::new(0)),
-        }
+        })
     }
 
     pub fn request_pause(&self) {
@@ -459,7 +460,10 @@ impl<S: Spider> CrawlerEngine<S> {
                 Self::enqueue_follow_requests(&scheduler, follow_requests).await;
             }
             Err(err) => {
-                spider.on_error(&request, &err).await;
+                // Surface the typed SessionError as a string to the spider hook
+                // (NotFound vs Network vs UnsupportedMethod is preserved in the
+                // message; the typed error is available to direct fetch callers).
+                spider.on_error(&request, &err.to_string()).await;
                 stats.lock().await.failed_requests_count += 1;
             }
         }

@@ -1,8 +1,21 @@
-use crate::fetchers::client::Fetcher;
+use crate::fetchers::client::{Fetcher, FetcherError};
 use crate::fetchers::config::FetcherConfig;
 use crate::fetchers::response::Response;
 use crate::spiders::request::SpiderRequest;
 use std::collections::HashMap;
+
+/// Distinct failure modes for [`SessionManager::fetch`], so callers can tell a
+/// configuration error (wrong session name → not recoverable, abort) apart
+/// from a transient network failure (worth retrying).
+#[derive(Debug, thiserror::Error)]
+pub enum SessionError {
+    #[error("session '{0}' not found")]
+    NotFound(String),
+    #[error("unsupported HTTP method: {0}")]
+    UnsupportedMethod(String),
+    #[error("network error: {0}")]
+    Network(String),
+}
 
 pub struct SessionManager {
     sessions: HashMap<String, Fetcher>,
@@ -17,21 +30,25 @@ impl SessionManager {
         }
     }
 
-    pub fn add_session(&mut self, name: &str, config: FetcherConfig) {
-        self.sessions.insert(name.to_string(), Fetcher::new(config));
+    /// Add a named session. Propagates the error if the underlying HTTP client
+    /// cannot be built (see [`Fetcher::new`]).
+    pub fn add_session(&mut self, name: &str, config: FetcherConfig) -> Result<(), FetcherError> {
+        self.sessions
+            .insert(name.to_string(), Fetcher::new(config)?);
+        Ok(())
     }
 
-    pub fn ensure_default(&mut self) {
+    /// Ensure a "default" session exists, building it from the default config.
+    pub fn ensure_default(&mut self) -> Result<(), FetcherError> {
         if !self.sessions.contains_key("default") {
-            self.sessions.insert(
-                "default".to_string(),
-                Fetcher::new(self.default_config.clone()),
-            );
+            let fetcher = Fetcher::new(self.default_config.clone())?;
+            self.sessions.insert("default".to_string(), fetcher);
         }
+        Ok(())
     }
 
     /// Fetch using the session specified in the request (or "default").
-    pub async fn fetch(&self, request: &SpiderRequest) -> Result<Response, String> {
+    pub async fn fetch(&self, request: &SpiderRequest) -> Result<Response, SessionError> {
         let session_id = if request.session_id().is_empty() {
             "default"
         } else {
@@ -40,23 +57,15 @@ impl SessionManager {
         let fetcher = self
             .sessions
             .get(session_id)
-            .ok_or_else(|| format!("Session '{}' not found", session_id))?;
+            .ok_or_else(|| SessionError::NotFound(session_id.to_string()))?;
 
-        match request.method() {
-            "GET" => fetcher.get(request.url()).await.map_err(|e| e.to_string()),
-            "POST" => fetcher
-                .post(request.url(), request.body(), None)
-                .await
-                .map_err(|e| e.to_string()),
-            "PUT" => fetcher
-                .put(request.url(), request.body(), None)
-                .await
-                .map_err(|e| e.to_string()),
-            "DELETE" => fetcher
-                .delete(request.url())
-                .await
-                .map_err(|e| e.to_string()),
-            m => Err(format!("Unsupported HTTP method: {}", m)),
-        }
+        let result = match request.method() {
+            "GET" => fetcher.get(request.url()).await,
+            "POST" => fetcher.post(request.url(), request.body(), None).await,
+            "PUT" => fetcher.put(request.url(), request.body(), None).await,
+            "DELETE" => fetcher.delete(request.url()).await,
+            m => return Err(SessionError::UnsupportedMethod(m.to_string())),
+        };
+        result.map_err(|e| SessionError::Network(e.to_string()))
     }
 }
