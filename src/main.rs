@@ -43,7 +43,13 @@ async fn main() {
             no_stealth,
         } => {
             let config = FetcherConfig::builder().stealth(!no_stealth).build();
-            let fetcher = Fetcher::new(config);
+            let fetcher = match Fetcher::new(config) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("Failed to build HTTP client: {}", e);
+                    std::process::exit(1);
+                }
+            };
             match fetcher.get(&url).await {
                 Ok(response) => {
                     if let Some(css) = selector {
@@ -84,7 +90,13 @@ async fn main() {
             }
         }
         Commands::Extract { url, selector } => {
-            let fetcher = Fetcher::new(FetcherConfig::default());
+            let fetcher = match Fetcher::new(FetcherConfig::default()) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("Failed to build HTTP client: {}", e);
+                    std::process::exit(1);
+                }
+            };
             match fetcher.get(&url).await {
                 Ok(response) => {
                     let sel = response.selector();
