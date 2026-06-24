@@ -261,3 +261,47 @@ fn builder_max_body_bytes_overrides_default() {
     let cfg = FetcherConfig::builder().max_body_bytes(1024).build();
     assert_eq!(cfg.max_body_bytes, 1024);
 }
+
+// ---------------------------------------------------------------------------
+// build_headers – Client-Hints consistency (#36)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chromium_ua_gets_client_hints_with_derived_platform() {
+    let cfg = FetcherConfig::builder()
+        .user_agent(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        )
+        .build();
+    let headers = cfg.build_headers("https://example.com", true);
+    assert!(
+        headers.contains_key("sec-ch-ua"),
+        "Chrome UA should get sec-ch-ua"
+    );
+    assert_eq!(
+        headers.get("sec-ch-ua-platform").map(|s| s.as_str()),
+        Some("\"macOS\""),
+        "platform should be derived from the Mac UA, not hardcoded Windows"
+    );
+}
+
+#[test]
+fn firefox_ua_does_not_get_client_hints() {
+    let cfg = FetcherConfig::builder()
+        .user_agent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
+        )
+        .build();
+    let headers = cfg.build_headers("https://example.com", true);
+    assert!(
+        !headers.contains_key("sec-ch-ua"),
+        "Firefox does not implement Client Hints; sending sec-ch-ua reveals a bot"
+    );
+    assert!(
+        !headers.contains_key("sec-ch-ua-platform"),
+        "Firefox must not send sec-ch-ua-platform"
+    );
+    // Fetch-Metadata headers are still sent (Firefox supports them).
+    assert!(headers.contains_key("sec-fetch-mode"));
+}
