@@ -22,7 +22,7 @@ publish = false
 scraper = "0.22"
 ego-tree = "0.10"
 markup5ever = "0.14"
-cssparser = "0.34"
+cssparser = "0.37"
 reqwest = { version = "0.12", features = ["json", "cookies", "gzip", "brotli", "deflate", "rustls-tls"] }
 http = "1"
 tokio = { version = "1", features = ["full"] }
