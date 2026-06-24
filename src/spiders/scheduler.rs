@@ -1,8 +1,20 @@
 use super::request::SpiderRequest;
 use std::collections::{BinaryHeap, HashSet};
 
+/// Priority queue of pending requests plus a dedup set.
+///
+/// # Memory
+///
+/// `seen` records one fingerprint (a hex SHA string, ~64 bytes) for every
+/// unique URL ever enqueued and is never compacted, so its footprint grows
+/// linearly with the number of distinct URLs visited — roughly 100 MB per
+/// ~1M unique URLs once `HashSet` overhead is included. For very large or
+/// unbounded crawls, set `allowed_domains` on the spider to bound scope. The
+/// set is held in memory only; it is not persisted across checkpoints.
 pub struct Scheduler {
     queue: BinaryHeap<SpiderRequest>,
+    /// Fingerprints of every URL enqueued so far (dedup filter). Grows
+    /// unbounded with the number of unique URLs — see the type-level note.
     seen: HashSet<String>,
     include_kwargs: bool,
     include_headers: bool,
