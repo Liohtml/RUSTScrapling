@@ -19,7 +19,7 @@ rust-version = "1.88"
 publish = false
 
 [dependencies]
-scraper = "0.22"
+scraper = "0.27"
 ego-tree = "0.10"
 markup5ever = "0.14"
 cssparser = "0.34"
