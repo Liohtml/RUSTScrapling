@@ -284,6 +284,32 @@ println!("Blocked: {}", resp.is_blocked());
 let json_data = resp.json()?;  // Parse as JSON
 ```
 
+#### Search engines (DuckDuckGo)
+
+DuckDuckGo's HTML endpoint (`html.duckduckgo.com/html/`) rate-limits automated
+requests aggressively — even with stealth headers — and on detection returns
+**HTTP 202 with its homepage** instead of results. Because 202 is nominally a
+success code, `resp.is_blocked()` does not catch it. It also wraps every result
+link in a `//duckduckgo.com/l/?uddg=…` redirect. The `fetchers::search` helpers
+handle both:
+
+```rust
+use rust_scrapling::fetchers::search::{decode_duckduckgo_href, is_duckduckgo_blocked};
+
+let resp = fetcher.get("https://html.duckduckgo.com/html/?q=rust").await?;
+if is_duckduckgo_blocked(&resp) {
+    eprintln!("DuckDuckGo soft-blocked this request (HTTP 202 homepage)");
+} else {
+    for link in resp.selector().css("a.result__a") {
+        let raw = link.attrib().get("href").map(|h| h.as_str().to_string()).unwrap_or_default();
+        println!("{}", decode_duckduckgo_href(&raw)); // real target, not the /l/ redirect
+    }
+}
+```
+
+For reliable automated search, prefer **Startpage** or the **DuckDuckGo Instant
+Answers API** (`api.duckduckgo.com/?format=json`).
+
 ### Building a Spider
 
 Define a spider by implementing the `Spider` trait:
