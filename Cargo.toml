@@ -10,7 +10,10 @@ homepage = "https://github.com/Liohtml/RUSTScrapling"
 keywords = ["scraping", "web-scraping", "html-parser", "css-selectors", "crawler"]
 categories = ["web-programming", "parser-implementations", "command-line-utilities"]
 readme = "README.md"
-rust-version = "1.75"
+# Real MSRV: the dependency tree (cookie_store, time, icu_*) requires 1.88,
+# and the committed Cargo.lock is v4 (needs Cargo >= 1.78). Verified by the
+# `msrv` CI job; the previously declared 1.75 did not actually build.
+rust-version = "1.88"
 # Not yet released on crates.io (README documents a git dependency). Guard
 # against an accidental `cargo publish` reserving the name permanently.
 publish = false
