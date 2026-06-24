@@ -11,6 +11,9 @@ keywords = ["scraping", "web-scraping", "html-parser", "css-selectors", "crawler
 categories = ["web-programming", "parser-implementations", "command-line-utilities"]
 readme = "README.md"
 rust-version = "1.75"
+# Not yet released on crates.io (README documents a git dependency). Guard
+# against an accidental `cargo publish` reserving the name permanently.
+publish = false
 
 [dependencies]
 scraper = "0.22"
@@ -22,6 +25,10 @@ http = "1"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# "bundled" statically links a vendored SQLite for portability. SQLite CVEs
+# therefore require a crate bump rather than an OS update — Dependabot (see
+# .github/dependabot.yml) surfaces those bumps as PRs, and `cargo audit` in CI
+# flags any known advisory in the meantime.
 rusqlite = { version = "0.32", features = ["bundled"] }
 regex = "1"
 sha2 = "0.10"

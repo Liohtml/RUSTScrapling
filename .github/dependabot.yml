@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # Rust crates — surfaces security patches for dependencies (including the
+  # vendored SQLite shipped via rusqlite's "bundled" feature) as PRs.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # GitHub Actions — keeps the SHA-pinned action refs current with upstream
+  # security fixes (the pins themselves are in .github/workflows/ci.yml).
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
