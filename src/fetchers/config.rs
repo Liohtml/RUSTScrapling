@@ -68,6 +68,19 @@ impl FetcherConfig {
                 % constants::USER_AGENTS.len();
             constants::USER_AGENTS[idx].to_string()
         });
+        // Client-Hints (`sec-ch-ua*`) are a Chromium-only feature; sending them
+        // alongside a Firefox User-Agent is a contradictory, easily-detected
+        // fingerprint. Decide before moving `ua` into the header map.
+        let is_chromium = ua.contains("Chrome") || ua.contains("Chromium");
+        let platform = if ua.contains("Windows") {
+            "\"Windows\""
+        } else if ua.contains("Macintosh") || ua.contains("Mac OS") {
+            "\"macOS\""
+        } else if ua.contains("Linux") || ua.contains("X11") {
+            "\"Linux\""
+        } else {
+            "\"Windows\""
+        };
         headers.insert("user-agent".to_string(), ua);
 
         if stealth {
@@ -83,19 +96,25 @@ impl FetcherConfig {
                 .entry("accept-encoding".to_string())
                 .or_insert_with(|| constants::ACCEPT_ENCODING.to_string());
 
-            headers.entry("sec-ch-ua".to_string()).or_insert_with(|| {
-                "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\""
-                    .to_string()
-            });
+            // Client-Hints headers only for Chromium UAs, with a platform
+            // derived from the UA (not hardcoded to Windows).
+            if is_chromium {
+                headers.entry("sec-ch-ua".to_string()).or_insert_with(|| {
+                    "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\""
+                        .to_string()
+                });
 
-            headers
-                .entry("sec-ch-ua-mobile".to_string())
-                .or_insert_with(|| "?0".to_string());
+                headers
+                    .entry("sec-ch-ua-mobile".to_string())
+                    .or_insert_with(|| "?0".to_string());
 
-            headers
-                .entry("sec-ch-ua-platform".to_string())
-                .or_insert_with(|| "\"Windows\"".to_string());
+                headers
+                    .entry("sec-ch-ua-platform".to_string())
+                    .or_insert_with(|| platform.to_string());
+            }
 
+            // Fetch-Metadata headers (`sec-fetch-*`) are sent by both Chromium
+            // and Firefox, so they remain unconditional in stealth mode.
             headers
                 .entry("sec-fetch-dest".to_string())
                 .or_insert_with(|| "document".to_string());

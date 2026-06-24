@@ -19,7 +19,11 @@ pub const USER_AGENTS: &[&str] = &[
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0",
 ];
 
-pub const BLOCKED_STATUS_CODES: &[u16] = &[401, 403, 407, 429, 444, 500, 502, 503, 504];
+// Bot-blocking / anti-automation status codes only. 5xx server errors are
+// deliberately excluded: they are genuine server failures, not bot blocks, and
+// classifying them as blocks would wrongly suppress the on_error hook and burn
+// the blocked-retry budget (444 is Nginx's non-standard "connection closed").
+pub const BLOCKED_STATUS_CODES: &[u16] = &[401, 403, 407, 429, 444];
 
 pub const ACCEPT_HEADER: &str =
     "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8";

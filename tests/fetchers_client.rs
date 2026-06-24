@@ -91,16 +91,35 @@ fn test_response_headers() {
 }
 
 #[test]
-fn test_response_500_is_blocked() {
-    let resp = Response::new(
-        500,
-        "text/html".to_string(),
-        "Internal Server Error".to_string(),
-        "https://example.com".to_string(),
-        HashMap::new(),
-    );
-    assert!(resp.is_blocked());
-    assert!(!resp.is_success());
+fn test_response_5xx_is_not_blocked() {
+    // 5xx are genuine server errors, not bot blocks (#44). They must not be
+    // classified as blocked, so the engine surfaces them via on_error rather
+    // than silently burning the blocked-retry budget.
+    for code in [500u16, 502, 503, 504] {
+        let resp = Response::new(
+            code,
+            "text/html".to_string(),
+            "Server Error".to_string(),
+            "https://example.com".to_string(),
+            HashMap::new(),
+        );
+        assert!(!resp.is_blocked(), "{} must not be is_blocked", code);
+        assert!(!resp.is_success(), "{} is not success", code);
+    }
+}
+
+#[test]
+fn test_bot_block_codes_are_blocked() {
+    for code in [401u16, 403, 407, 429, 444] {
+        let resp = Response::new(
+            code,
+            "text/html".to_string(),
+            "blocked".to_string(),
+            "https://example.com".to_string(),
+            HashMap::new(),
+        );
+        assert!(resp.is_blocked(), "{} should be is_blocked", code);
+    }
 }
 
 #[test]
