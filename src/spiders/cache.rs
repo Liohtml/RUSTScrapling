@@ -24,23 +24,30 @@ impl ResponseCache {
         Ok(Self { cache_dir: path })
     }
 
-    pub fn get(&self, url: &str) -> Option<CachedResponse> {
+    pub async fn get(&self, url: &str) -> Option<CachedResponse> {
         let file_path = self.cache_path(url);
-        let data = std::fs::read_to_string(&file_path).ok()?;
+        // Async read so the Tokio worker thread is not blocked on disk I/O.
+        let data = tokio::fs::read_to_string(&file_path).await.ok()?;
         serde_json::from_str(&data).ok()
     }
 
-    pub fn put(&self, url: &str, response: &CachedResponse) -> Result<(), std::io::Error> {
+    pub async fn put(&self, url: &str, response: &CachedResponse) -> Result<(), std::io::Error> {
         let file_path = self.cache_path(url);
+        let cache_dir = self.cache_dir.clone();
         let data = serde_json::to_string_pretty(response).map_err(std::io::Error::other)?;
-        // Write atomically: a temp file in the same directory keeps the rename
-        // same-filesystem, and `persist` performs an atomic replace on both
-        // POSIX (rename) and Windows (MoveFileExW with REPLACE_EXISTING). The
-        // temp file is auto-removed on drop if anything fails before persist.
-        let mut tmp = NamedTempFile::new_in(&self.cache_dir)?;
-        tmp.write_all(data.as_bytes())?;
-        tmp.persist(&file_path).map_err(|e| e.error)?;
-        Ok(())
+        // The atomic temp-file + persist write is synchronous (NamedTempFile
+        // has no async API), so run it on the blocking pool to avoid stalling
+        // a Tokio worker thread. `persist` still does an atomic replace on both
+        // POSIX (rename) and Windows (MoveFileExW with REPLACE_EXISTING), and
+        // the temp file is auto-removed on drop if anything fails.
+        tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+            let mut tmp = NamedTempFile::new_in(&cache_dir)?;
+            tmp.write_all(data.as_bytes())?;
+            tmp.persist(&file_path).map_err(|e| e.error)?;
+            Ok(())
+        })
+        .await
+        .map_err(std::io::Error::other)?
     }
 
     fn cache_path(&self, url: &str) -> PathBuf {
@@ -66,32 +73,34 @@ mod tests {
         }
     }
 
-    #[test]
-    fn put_then_get_roundtrips() {
+    #[tokio::test]
+    async fn put_then_get_roundtrips() {
         let dir = tempdir().unwrap();
         let cache = ResponseCache::new(dir.path().to_str().unwrap()).unwrap();
         cache
             .put("https://example.com", &sample("https://example.com"))
+            .await
             .unwrap();
-        let got = cache.get("https://example.com").unwrap();
+        let got = cache.get("https://example.com").await.unwrap();
         assert_eq!(got.status, 200);
         assert_eq!(got.url, "https://example.com");
     }
 
-    #[test]
-    fn put_overwrites_existing_entry_and_leaves_no_tmp_files() {
+    #[tokio::test]
+    async fn put_overwrites_existing_entry_and_leaves_no_tmp_files() {
         let dir = tempdir().unwrap();
         let cache = ResponseCache::new(dir.path().to_str().unwrap()).unwrap();
         // Two writes to the same URL — the second must atomically replace the
         // first (this is the path that fails on Windows with plain rename).
         cache
             .put("https://example.com", &sample("https://example.com"))
+            .await
             .unwrap();
         let mut updated = sample("https://example.com");
         updated.body = "<html>updated</html>".to_string();
-        cache.put("https://example.com", &updated).unwrap();
+        cache.put("https://example.com", &updated).await.unwrap();
         assert_eq!(
-            cache.get("https://example.com").unwrap().body,
+            cache.get("https://example.com").await.unwrap().body,
             "<html>updated</html>"
         );
 
@@ -105,10 +114,10 @@ mod tests {
         assert!(entries[0].ends_with(".json"));
     }
 
-    #[test]
-    fn get_returns_none_for_missing() {
+    #[tokio::test]
+    async fn get_returns_none_for_missing() {
         let dir = tempdir().unwrap();
         let cache = ResponseCache::new(dir.path().to_str().unwrap()).unwrap();
-        assert!(cache.get("https://missing.example").is_none());
+        assert!(cache.get("https://missing.example").await.is_none());
     }
 }

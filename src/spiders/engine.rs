@@ -147,7 +147,7 @@ impl<S: Spider> CrawlerEngine<S> {
         // Check for checkpoint restore
         let resuming = if let Some(ref cp) = self.checkpoint {
             if cp.exists() {
-                if let Some(data) = cp.restore() {
+                if let Some(data) = cp.restore().await {
                     let mut sched = self.scheduler.lock().await;
                     for url in &data.pending_urls {
                         let mut req = SpiderRequest::new(url);
@@ -302,12 +302,12 @@ impl<S: Spider> CrawlerEngine<S> {
                     seen_fingerprints: Vec::new(), // Fingerprints are internal to scheduler
                     items_count,
                 };
-                let _ = cp.save(&data);
+                let _ = cp.save(&data).await;
             }
         } else {
             // Clean up checkpoint on successful completion
             if let Some(ref cp) = self.checkpoint {
-                cp.cleanup();
+                cp.cleanup().await;
             }
         }
 
@@ -378,7 +378,7 @@ impl<S: Spider> CrawlerEngine<S> {
 
         // Check dev cache
         if let Some(ref response_cache) = cache {
-            if let Some(cached) = response_cache.get(&url) {
+            if let Some(cached) = response_cache.get(&url).await {
                 stats.lock().await.cache_hits += 1;
 
                 let fetcher_resp = FetcherResponse::new(
@@ -434,7 +434,7 @@ impl<S: Spider> CrawlerEngine<S> {
                         url: response.url().to_string(),
                         headers: response.headers().clone(),
                     };
-                    let _ = response_cache.put(&url, &cached);
+                    let _ = response_cache.put(&url, &cached).await;
                 }
 
                 let spider_resp = SpiderResponse::new(response);
