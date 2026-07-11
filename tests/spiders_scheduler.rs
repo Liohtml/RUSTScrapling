@@ -85,3 +85,53 @@ fn test_dequeue_empty() {
     let mut sched = Scheduler::new(false, false, false);
     assert!(sched.dequeue().is_none());
 }
+
+#[test]
+fn test_snapshot_captures_pending_and_seen() {
+    let mut sched = Scheduler::new(false, false, false);
+    sched.enqueue(SpiderRequest::new("https://example.com/pending"));
+    sched.enqueue(SpiderRequest::new("https://example.com/crawled"));
+    // Simulate one request having been dispatched already.
+    let dispatched = sched.dequeue().unwrap();
+
+    let (pending, seen) = sched.snapshot();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(seen.len(), 2, "seen keeps fingerprints of dequeued URLs");
+    assert!(seen.contains(&dispatched.fingerprint().to_string()));
+}
+
+#[test]
+fn test_restore_seen_rejects_already_crawled_urls() {
+    let mut first_run = Scheduler::new(false, false, false);
+    first_run.enqueue(SpiderRequest::new("https://example.com/done"));
+    let (_, seen) = first_run.snapshot();
+
+    let mut resumed = Scheduler::new(false, false, false);
+    resumed.restore_seen(seen);
+    assert!(
+        !resumed.enqueue(SpiderRequest::new("https://example.com/done")),
+        "URL crawled before the pause must be filtered after resume"
+    );
+    assert!(
+        resumed.enqueue(SpiderRequest::new("https://example.com/new")),
+        "unseen URL must still be accepted after resume"
+    );
+}
+
+#[test]
+fn test_restored_pending_reenqueues_with_dont_filter() {
+    // Mirrors the engine resume path: pending URLs are part of the restored
+    // seen set, so they are re-enqueued with dont_filter to bypass the dedup.
+    let mut first_run = Scheduler::new(false, false, false);
+    first_run.enqueue(SpiderRequest::new("https://example.com/pending"));
+    let (pending, seen) = first_run.snapshot();
+
+    let mut resumed = Scheduler::new(false, false, false);
+    resumed.restore_seen(seen);
+    for url in &pending {
+        let mut req = SpiderRequest::new(url);
+        req.set_dont_filter(true);
+        assert!(resumed.enqueue(req));
+    }
+    assert_eq!(resumed.len(), 1);
+}

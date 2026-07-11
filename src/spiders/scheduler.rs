@@ -10,7 +10,8 @@ use std::collections::{BinaryHeap, HashSet};
 /// linearly with the number of distinct URLs visited — roughly 100 MB per
 /// ~1M unique URLs once `HashSet` overhead is included. For very large or
 /// unbounded crawls, set `allowed_domains` on the spider to bound scope. The
-/// set is held in memory only; it is not persisted across checkpoints.
+/// set is persisted in checkpoints (via [`Scheduler::snapshot`]) so resumed
+/// crawls do not re-visit already-seen URLs.
 pub struct Scheduler {
     queue: BinaryHeap<SpiderRequest>,
     /// Fingerprints of every URL enqueued so far (dedup filter). Grows
@@ -76,5 +77,19 @@ impl Scheduler {
 
     pub fn pending_requests(&self) -> Vec<&SpiderRequest> {
         self.queue.iter().collect()
+    }
+
+    /// Snapshot the scheduler state for checkpointing: the URLs of all
+    /// pending requests plus a copy of the seen fingerprint set.
+    pub fn snapshot(&self) -> (Vec<String>, Vec<String>) {
+        let pending = self.queue.iter().map(|r| r.url().to_string()).collect();
+        let seen = self.seen.iter().cloned().collect();
+        (pending, seen)
+    }
+
+    /// Restore the seen fingerprint set from a checkpoint so a resumed crawl
+    /// does not re-visit URLs that were already crawled before the pause.
+    pub fn restore_seen(&mut self, fingerprints: impl IntoIterator<Item = String>) {
+        self.seen.extend(fingerprints);
     }
 }
