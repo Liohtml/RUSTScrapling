@@ -34,6 +34,7 @@ serde_json = "1"
 # flags any known advisory in the meantime.
 rusqlite = { version = "0.32", features = ["bundled"] }
 regex = "1"
+encoding_rs = "0.8"
 sha2 = "0.10"
 url = "2"
 thiserror = "2"

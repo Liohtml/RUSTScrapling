@@ -1682,6 +1682,7 @@ dependencies = [
  "clap",
  "cssparser",
  "ego-tree",
+ "encoding_rs",
  "env_logger",
  "http",
  "indexmap",
