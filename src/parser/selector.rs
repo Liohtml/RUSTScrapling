@@ -66,6 +66,12 @@ impl Selector {
         self.node_ref().value().is_document() || self.node_ref().value().is_fragment()
     }
 
+    /// Whether this selector points at an element node (not the document
+    /// root, a text node, or a comment).
+    pub(crate) fn is_element(&self) -> bool {
+        self.node_ref().value().is_element()
+    }
+
     /// Stable identity of the underlying DOM node. Useful for comparing two
     /// `Selector`s that reference the same node without resorting to HTML
     /// string equality (which is ambiguous for identical siblings).
