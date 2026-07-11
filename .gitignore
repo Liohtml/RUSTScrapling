@@ -28,3 +28,4 @@ Thumbs.db
 
 # Claude Code local settings (contains secrets)
 .claude/settings.local.json
+scripts/benchmark/page.html

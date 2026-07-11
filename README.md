@@ -2,53 +2,59 @@
 
 # RUSTScrapling
 
-**A high-performance Rust port of [Scrapling](https://github.com/D4Vinci/Scrapling) -- the modern web scraping framework built by web scrapers, for web scrapers.**
+![RUSTScrapling — the crab that weaves the web](docs/assets/demo.gif)
+
+**A high-performance Rust port of [Scrapling](https://github.com/D4Vinci/Scrapling) — the modern web scraping framework built by web scrapers, for web scrapers.**
 
 [![CI](https://github.com/Liohtml/RUSTScrapling/actions/workflows/ci.yml/badge.svg)](https://github.com/Liohtml/RUSTScrapling/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/Rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE-MIT)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE-APACHE)
 
-*Parse HTML with CSS selectors, fetch pages with stealth headers, and crawl entire sites with async concurrency -- all from a single Rust crate.*
+*Parse HTML with CSS selectors, survive page redesigns with adaptive selectors, and crawl entire sites with async concurrency — from a single Rust crate.*
 
 </div>
 
 ---
 
-## Why RUSTScrapling?
+## What is this?
 
-The original [Scrapling](https://github.com/D4Vinci/Scrapling) (Python) combines three powerful ideas in one framework:
+Web scraping in three sentences:
 
-1. **Adaptive Parsing** -- CSS/XPath selectors that can relocate elements when page structure changes
-2. **Multi-Strategy Fetching** -- simple HTTP, stealth-mode, and browser automation in one API
-3. **Spider-Based Crawling** -- Scrapy-inspired async crawlers with rate limiting, deduplication, and checkpointing
+1. **You point it at HTML** — a string, a URL, or a whole site — and query it with plain CSS selectors (`page.css(".price")`).
+2. **When a site redesigns and your selector breaks**, adaptive mode finds the element again by similarity to what it looked like before — no code change needed.
+3. **When one page isn't enough**, the spider engine crawls whole sites concurrently with rate limiting, deduplication, robots.txt compliance, and pause/resume checkpoints.
 
-**RUSTScrapling** brings this to Rust with native performance, memory safety, and zero-cost abstractions. It's structured as four independent layers that compose together:
+It's a faithful Rust port of Python's [Scrapling](https://github.com/D4Vinci/Scrapling) (same concepts, same API names), which means: **~5× faster extraction, ~4× less memory, and a single static binary** — no interpreter, no virtualenv, no cold start. [Benchmarks below.](#how-fast-is-it)
 
-| Layer | Purpose | Key Types |
-|-------|---------|-----------|
-| **Core** | Rich string types, attribute maps, persistent storage | `TextHandler`, `AttributesHandler`, `SqliteStorage` |
-| **Parser** | HTML parsing with CSS selectors, DOM traversal, regex | `Selector`, `Selectors` |
-| **Fetchers** | Async HTTP with retries, stealth headers, proxy rotation | `Fetcher`, `FetcherConfig`, `Response` |
-| **Spiders** | Concurrent crawl orchestration | `Spider` trait, `CrawlerEngine`, `SpiderRequest` |
+| Layer | What it gives you | Key types |
+|-------|-------------------|-----------|
+| **Parser** | CSS selectors, DOM navigation, regex extraction, adaptive relocation | `Selector`, `Selectors` |
+| **Fetchers** | Async HTTP with retries, stealth headers, charset-aware decoding, proxy rotation | `Fetcher`, `Response` |
+| **Spiders** | Concurrent crawling: rules, sitemaps, dedup, checkpoints | `Spider`, `CrawlSpider`, `SitemapSpider`, `CrawlerEngine` |
+| **Core** | Rich text values, attribute maps, SQLite element storage | `TextHandler`, `SqliteStorage` |
+
+Each layer works on its own — use just the parser, or the whole stack.
 
 ---
 
 ## Table of Contents
 
-- [Installation](#installation)
 - [Quick Start](#quick-start)
+- [How fast is it?](#how-fast-is-it)
+- [Using it in AI agent workflows](#using-it-in-ai-agent-workflows)
 - [Usage Guide](#usage-guide)
   - [Parsing HTML](#parsing-html)
   - [CSS Selectors](#css-selectors)
+  - [Adaptive Selectors (survive redesigns)](#adaptive-selectors-survive-redesigns)
   - [Text Extraction](#text-extraction)
   - [DOM Navigation](#dom-navigation)
   - [Regex Extraction](#regex-extraction)
   - [Fetching Pages](#fetching-pages)
   - [Building a Spider](#building-a-spider)
+  - [CrawlSpider, SitemapSpider & LinkExtractor](#crawlspider-sitemapspider--linkextractor)
 - [CLI](#cli)
 - [Architecture](#architecture)
-- [API Reference](#api-reference)
 - [Testing](#testing)
 - [Contributing](#contributing)
 - [License](#license)
@@ -56,55 +62,182 @@ The original [Scrapling](https://github.com/D4Vinci/Scrapling) (Python) combines
 
 ---
 
-## Installation
+## Quick Start
 
 Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
 rust_scrapling = { git = "https://github.com/Liohtml/RUSTScrapling" }
-```
-
-Or clone and build locally:
-
-```bash
-git clone https://github.com/Liohtml/RUSTScrapling.git
-cd RUSTScrapling
-cargo build --release
+tokio = { version = "1", features = ["full"] }
 ```
 
 **Requirements:** Rust 1.88+ (edition 2021)
 
----
-
-## Quick Start
+Thirty seconds to your first scrape:
 
 ```rust
 use rust_scrapling::{Selector, Fetcher, FetcherConfig};
 
-// -- Parse static HTML --
-let html = r#"<html><body>
-  <h1 class="title">Hello World</h1>
-  <a href="/about">About</a>
-</body></html>"#;
-
-let page = Selector::from_html(html);
-let title = page.css("h1.title");
-println!("{}", title[0].text());  // "Hello World"
-
-// -- Fetch a live page --
 #[tokio::main]
 async fn main() {
-    let fetcher = Fetcher::new(FetcherConfig::default());
-    let response = fetcher.get("https://example.com").await.unwrap();
-    let page = response.selector();
+    // 1. Parse any HTML string
+    let page = Selector::from_html(r#"<h1 class="title">Hello World</h1>"#);
+    println!("{}", page.css("h1.title")[0].text()); // "Hello World"
 
-    for link in page.css("a") {
-        let href = link.attrib().get("href");
-        println!("{}: {}", link.text(), href.map(|h| h.as_str()).unwrap_or(""));
+    // 2. Or fetch a live page (stealth headers on by default)
+    let fetcher = Fetcher::new(FetcherConfig::default()).unwrap();
+    let response = fetcher.get("https://example.com").await.unwrap();
+    for link in response.selector().css("a") {
+        println!("{} -> {:?}", link.text(), link.get_attribute("href"));
     }
 }
 ```
+
+Crawl a whole site from its sitemap in one builder chain:
+
+```rust
+use rust_scrapling::{CrawlerEngine, SitemapSpider, CrawlRule, LinkExtractor, FetcherConfig};
+use rust_scrapling::spiders::session::SessionManager;
+use std::sync::Arc;
+
+let spider = SitemapSpider::builder("shop")
+    .sitemap_urls(["https://shop.example.com/robots.txt"]) // finds sitemaps automatically
+    .rule(CrawlRule::new(LinkExtractor::new().allow([r"/products/"]).unwrap()))
+    .parse_item(Arc::new(|resp| {
+        resp.css("h1.product-title")
+            .into_iter()
+            .map(|t| serde_json::json!({ "title": t.text().to_string(), "url": resp.url() }))
+            .collect()
+    }))
+    .build();
+
+let engine = CrawlerEngine::new(Arc::new(spider), SessionManager::new(FetcherConfig::default()), None)?;
+let result = engine.crawl().await;
+result.items.to_jsonl(std::path::Path::new("products.jsonl"))?;
+```
+
+---
+
+## How fast is it?
+
+Measured head-to-head against the original Python Scrapling (v0.4.10, lxml-backed) on the **same machine, same document, same selectors, same extraction work**: a 616 KB e-commerce page with 1,000 product cards; each run parses the page and extracts title, price, and link from every card. Median of 30 runs, single-threaded.
+
+| Workload | Python Scrapling 0.4.10 | RUSTScrapling (release) | Speedup |
+|----------|------------------------:|------------------------:|:-------:|
+| Parse + extract 3,000 fields from 1,000 products | 105.7 ms | **19.2 ms** | **~5.5×** |
+| Parse only (build the DOM) | 15.6 ms | 15.7 ms | ~1× |
+| Peak process memory for the same job | 37 MB | **9 MB** | **~4×** |
+
+What the numbers mean, honestly:
+
+- **Raw HTML parsing is a tie** — lxml's C parser is excellent, and html5ever matches it. The Rust win is everything *after* parsing: selector matching, DOM traversal, and text extraction have no interpreter overhead, so end-to-end extraction is ~5.5× faster.
+- **Memory scales the same way**: ~9 MB peak vs ~37 MB for one page. Crawling with 8 concurrent workers, that gap compounds.
+- **Concurrency is where Rust pulls furthest ahead in practice**: the spider engine runs on `tokio` — thousands of in-flight requests on a few OS threads, no GIL, no multiprocessing serialization overhead when fanning work out.
+- **Deployment**: `cargo build --release` produces one static binary. No Python runtime, no dependency resolution at deploy time, millisecond cold starts — which matters for serverless scrapers and agent tools (next section).
+
+Reproduce it yourself — the fixture generator and both benchmark scripts are in the repo:
+
+```bash
+cd scripts/benchmark
+python3 gen_page.py                       # writes the shared page.html fixture
+python3 bench_python.py                   # pip install scrapling first
+cargo run --release --example benchmark   # from the repo root
+```
+
+---
+
+## Using it in AI agent workflows
+
+Scraping is one of the most common tools an LLM agent calls — and one of the most punishing: it runs on every task, latency lands inside the agent loop, and a broken selector silently poisons downstream reasoning. RUSTScrapling is a good fit for exactly those reasons:
+
+- **Latency lives in your agent loop.** 19 ms instead of 106 ms per page extraction matters when an agent chains fetch → extract → reason several times per task.
+- **Adaptive selectors reduce silent breakage.** When a target site redesigns, `css_adaptive` relocates the element by similarity instead of returning nothing — your agent's tool keeps working instead of feeding it empty results.
+- **Deterministic, structured output.** Selectors + JSON out, no LLM tokens spent parsing HTML. Feed the model *data*, not markup.
+- **One static binary.** Trivially shippable as a sandboxed tool next to your agent runtime — no Python environment in the container.
+
+### Pattern 1 — expose it as a tool (function calling / MCP)
+
+Wrap fetch + extract in one function with a JSON contract, then register it as a tool in your agent framework (Anthropic tool use, an MCP server, LangChain, etc.):
+
+```rust
+use rust_scrapling::{Fetcher, FetcherConfig};
+
+/// Tool: fetch a URL and extract elements by CSS selector.
+/// Input:  { "url": "...", "selector": "..." }
+/// Output: [ { "tag": "...", "text": "...", "attrs": {...} } ]
+pub async fn scrape_tool(url: &str, selector: &str) -> anyhow::Result<serde_json::Value> {
+    let fetcher = Fetcher::new(FetcherConfig::default())?;
+    let response = fetcher.get(url).await?;
+    let items: Vec<serde_json::Value> = response
+        .selector()
+        .css(selector)
+        .into_iter()
+        .map(|el| {
+            serde_json::json!({
+                "tag": el.tag(),
+                "text": el.get_all_text(" ", true, &["script", "style"], None).to_string(),
+                "attrs": el.attrib().json_string(),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!(items))
+}
+```
+
+A matching tool definition for the model:
+
+```json
+{
+  "name": "scrape",
+  "description": "Fetch a web page and extract elements matching a CSS selector. Returns structured JSON.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "url": { "type": "string" },
+      "selector": { "type": "string", "description": "CSS selector, e.g. 'h1' or '.price'" }
+    },
+    "required": ["url", "selector"]
+  }
+}
+```
+
+### Pattern 2 — the CLI as a zero-code agent tool
+
+Agents that can run shell commands can use RUSTScrapling with no integration work at all — the CLI emits JSON:
+
+```bash
+rust-scrapling fetch https://example.com --selector "h1" --format json
+```
+
+Allow-list that one binary in your agent's sandbox and you have a fast, memory-safe scraping tool with no network stack inside the agent process itself.
+
+### Pattern 3 — self-healing extraction for long-running agents
+
+Autonomous agents monitoring sites for weeks can't page a human when a selector dies. Save the element once, then let relocation absorb redesigns:
+
+```rust
+use rust_scrapling::core::storage::SqliteStorage;
+use rust_scrapling::parser::DEFAULT_RELOCATION_PERCENTAGE;
+
+let store = SqliteStorage::new("elements.db", "https://example.com")?;
+
+// css_adaptive = normal CSS first; if the selector stops matching,
+// find the element again by similarity to its saved snapshot.
+let prices = page.css_adaptive(
+    "#main .price",   // the selector that might break
+    "product-price",  // stable identifier for this element
+    &store,
+    true,             // auto_save: keep the snapshot fresh as the page drifts
+    DEFAULT_RELOCATION_PERCENTAGE,
+)?;
+```
+
+The agent's extraction tool now degrades gracefully: redesign → relocation → same JSON output, and the refreshed snapshot tracks the new page structure.
+
+### Pattern 4 — bulk collection for RAG pipelines
+
+Use `SitemapSpider` to turn a whole site into clean JSONL for chunking and embedding — the quick-start example above is exactly that: robots.txt → sitemap index → filtered URLs → structured items, with dedup, rate limiting, and resumable checkpoints for large corpora built in.
 
 ---
 
@@ -131,20 +264,10 @@ Full CSS3 selector support powered by the `scraper` crate:
 ```rust
 let page = Selector::from_html(html);
 
-// By class
-let items = page.css("div.product");
-
-// By ID
-let main = page.css("#main-content");
-
-// By attribute
-let priced = page.css("[data-price]");
-
-// Compound selectors
-let links = page.css("nav > ul > li > a.active");
-
-// Descendant selectors
-let deep = page.css("div.container span.highlight");
+let items = page.css("div.product");           // by class
+let main = page.css("#main-content");          // by ID
+let priced = page.css("[data-price]");         // by attribute
+let links = page.css("nav > ul > li > a.active"); // compound
 ```
 
 The result is a `Selectors` collection with batch operations:
@@ -152,46 +275,48 @@ The result is a `Selectors` collection with batch operations:
 ```rust
 let items = page.css("li.item");
 
-// Access by index
 let first = &items[0];
-let last = items.last().unwrap();
-
-// Iterate
 for item in &items {
     println!("{}: {}", item.tag(), item.text());
 }
 
-// Filter
 let special = items.filter(|item| item.has_class("special"));
-
-// Search (find first match)
 let target = items.search(|item| item.text().as_str() == "Target");
-
-// Chain CSS queries
-let names = page.css("div.product").css("h2.name");
-
-// Batch text extraction
-let all_text: Vec<_> = items.getall();  // Vec<TextHandler>
+let names = page.css("div.product").css("h2.name");  // chain queries
+let all_text: Vec<_> = items.getall();
 ```
+
+### Adaptive Selectors (survive redesigns)
+
+Save an element's "fingerprint" (tag, attributes, text, position, parent/sibling context) to SQLite. When the selector later stops matching — because the site changed — `relocate`/`css_adaptive` scores every element in the new page against the snapshot and returns the best match above a similarity threshold:
+
+```rust
+use rust_scrapling::core::storage::SqliteStorage;
+use rust_scrapling::parser::{Selector, DEFAULT_RELOCATION_PERCENTAGE};
+
+let store = SqliteStorage::new("elements.db", "https://example.com")?;
+
+// First run: selector works, element gets saved under "product-card".
+let page = Selector::from_html(&old_html);
+page.css_adaptive("#products .product", "product-card", &store, true, DEFAULT_RELOCATION_PERCENTAGE)?;
+
+// After a redesign: same call, selector fails, relocation finds the moved element.
+let page = Selector::from_html(&new_html);
+let found = page.css_adaptive("#products .product", "product-card", &store, true, DEFAULT_RELOCATION_PERCENTAGE)?;
+assert!(!found.is_empty());
+```
+
+The similarity scoring is a port of upstream Scrapling's algorithm (with a difflib-parity sequence matcher), so behavior matches the Python original.
 
 ### Text Extraction
 
 `TextHandler` wraps every text value with regex, JSON, and cleaning methods:
 
 ```rust
-// Direct text (immediate children only)
-let text = element.text();  // TextHandler
-
-// All text recursively, ignoring <script> and <style>
-let all_text = element.get_all_text("\n", true, &["script", "style"], None);
-
-// Chaining
+let text = element.text();                         // direct text
+let all = element.get_all_text("\n", true, &["script", "style"], None); // recursive
 let cleaned = element.text().strip().to_lowercase().replace_str("old", "new");
-
-// JSON parsing
-let data = element.text().json().unwrap();  // serde_json::Value
-
-// Inner/outer HTML
+let data = element.text().json()?;                 // parse as JSON
 let inner = element.html_content();
 let outer = element.outer_html();
 ```
@@ -201,58 +326,38 @@ let outer = element.outer_html();
 ```rust
 let item = page.css("li.product").first().unwrap();
 
-// Parent
 let list = item.parent().unwrap();
-assert_eq!(list.tag(), "ul");
-
-// Children (element nodes only)
 let children = list.children();
-
-// Siblings
 let siblings = item.siblings();
 let next = item.next();
 let prev = item.previous();
 
-// Attributes
 let attrs = item.attrib();
 let id = attrs.get("data-id").unwrap();
-let has_class = item.has_class("featured");
 
-// Search by text
 let heading = page.find_by_text("Hello World", true, false, false);
-let partial = page.find_by_text("Hello", true, true, false);  // partial match
-
-// Search by regex
-let match_ = page.find_by_regex(r"Item \d+", true, false);
+let matched = page.find_by_regex(r"Item \d+", true, false);
 ```
 
 ### Regex Extraction
 
-Extract data from text using regex, with capture group support:
-
 ```rust
 let price_el = page.css("span.price").first().unwrap();
 
-// All matches (returns capture group 1 if present, else group 0)
-let prices = price_el.re(r"\$(\d+\.\d+)", true, false, true);
-// prices[0].as_str() == "19.99"
-
-// First match only
-let first = price_el.re_first(r"\$(\d+\.\d+)", true, false, true);
-
-// Batch regex across multiple elements
-let all_prices = page.css("span.price").re(r"\$(\d+\.\d+)", true, false, true);
+let prices = price_el.re(r"\$(\d+\.\d+)", true, false, true);        // all matches
+let first = price_el.re_first(r"\$(\d+\.\d+)", true, false, true);   // first match
+let all = page.css("span.price").re(r"\$(\d+\.\d+)", true, false, true); // batch
 ```
 
 ### Fetching Pages
 
-The `Fetcher` is an async HTTP client with retries, stealth headers, and proxy support:
+The `Fetcher` is an async HTTP client with retries, stealth headers, charset-aware body decoding, and proxy support:
 
 ```rust
 use rust_scrapling::{Fetcher, FetcherConfig};
 
 // Default config: 30s timeout, 3 retries, stealth headers on
-let fetcher = Fetcher::new(FetcherConfig::default());
+let fetcher = Fetcher::new(FetcherConfig::default())?;
 
 // Custom config via builder
 let fetcher = Fetcher::new(
@@ -262,57 +367,41 @@ let fetcher = Fetcher::new(
         .proxy("http://proxy:8080")
         .user_agent("MyBot/1.0")
         .stealth(true)
-        .verify_ssl(false)
         .header("Authorization", "Bearer token123")
         .build()
-);
+)?;
 
-// HTTP methods
 let resp = fetcher.get("https://example.com").await?;
 let resp = fetcher.post("https://api.example.com/data", Some(body), None).await?;
-let resp = fetcher.put("https://api.example.com/data/1", None, Some(&json_val)).await?;
-let resp = fetcher.delete("https://api.example.com/data/1").await?;
 
-// Response -> Selector (auto-parses HTML)
-let page = resp.selector();
-let titles = page.css("h1");
-
-// Response metadata
+let page = resp.selector();       // Response -> Selector (auto-parses HTML)
 println!("Status: {}", resp.status());
-println!("URL: {}", resp.url());
 println!("Blocked: {}", resp.is_blocked());
-let json_data = resp.json()?;  // Parse as JSON
 ```
+
+Response bodies are decoded according to the `Content-Type` charset (ISO-8859-1, Shift_JIS, windows-1252, …) — no mojibake from non-UTF-8 sites.
 
 #### Search engines (DuckDuckGo)
 
-DuckDuckGo's HTML endpoint (`html.duckduckgo.com/html/`) rate-limits automated
-requests aggressively — even with stealth headers — and on detection returns
-**HTTP 202 with its homepage** instead of results. Because 202 is nominally a
-success code, `resp.is_blocked()` does not catch it. It also wraps every result
-link in a `//duckduckgo.com/l/?uddg=…` redirect. The `fetchers::search` helpers
-handle both:
+DuckDuckGo's HTML endpoint rate-limits automated requests aggressively and on detection returns **HTTP 202 with its homepage** instead of results. It also wraps result links in a redirect. The `fetchers::search` helpers handle both:
 
 ```rust
 use rust_scrapling::fetchers::search::{decode_duckduckgo_href, is_duckduckgo_blocked};
 
 let resp = fetcher.get("https://html.duckduckgo.com/html/?q=rust").await?;
 if is_duckduckgo_blocked(&resp) {
-    eprintln!("DuckDuckGo soft-blocked this request (HTTP 202 homepage)");
+    eprintln!("DuckDuckGo soft-blocked this request");
 } else {
     for link in resp.selector().css("a.result__a") {
         let raw = link.attrib().get("href").map(|h| h.as_str().to_string()).unwrap_or_default();
-        println!("{}", decode_duckduckgo_href(&raw)); // real target, not the /l/ redirect
+        println!("{}", decode_duckduckgo_href(&raw));
     }
 }
 ```
 
-For reliable automated search, prefer **Startpage** or the **DuckDuckGo Instant
-Answers API** (`api.duckduckgo.com/?format=json`).
-
 ### Building a Spider
 
-Define a spider by implementing the `Spider` trait:
+Implement the `Spider` trait for full control over a crawl:
 
 ```rust
 use rust_scrapling::{Spider, SpiderRequest, CrawlerEngine, FetcherConfig};
@@ -326,75 +415,44 @@ struct ProductSpider;
 #[async_trait]
 impl Spider for ProductSpider {
     fn name(&self) -> &str { "products" }
-
     fn start_urls(&self) -> Vec<String> {
         vec!["https://shop.example.com/products".into()]
     }
-
     fn concurrent_requests(&self) -> u32 { 8 }
     fn download_delay(&self) -> f64 { 0.5 }
     fn robots_txt_obey(&self) -> bool { true }
-
     fn allowed_domains(&self) -> std::collections::HashSet<String> {
         ["shop.example.com".into()].into()
     }
 
-    async fn parse(
-        &self,
-        response: SpiderResponse,
-    ) -> (Vec<serde_json::Value>, Vec<SpiderRequest>) {
+    async fn parse(&self, response: SpiderResponse)
+        -> (Vec<serde_json::Value>, Vec<SpiderRequest>)
+    {
         let page = response.selector();
-        let mut items = Vec::new();
-        let mut requests = Vec::new();
+        let items = page.css("div.product").into_iter().map(|p| serde_json::json!({
+            "name":  p.css("h2.name").first().map(|n| n.text().to_string()),
+            "price": p.css("span.price").first().map(|n| n.text().to_string()),
+        })).collect();
 
-        // Extract product data
-        for product in page.css("div.product") {
-            let name = product.css("h2.name");
-            let price = product.css("span.price");
-
-            items.push(serde_json::json!({
-                "name": name.first().map(|n| n.text().as_str().to_string()),
-                "price": price.first().map(|p| p.text().as_str().to_string()),
-                "url": response.url(),
-            }));
-        }
-
-        // Follow pagination
-        for link in page.css("a.next-page") {
-            if let Some(href) = link.attrib().get("href") {
-                let next_url = page.urljoin(href.as_str());
-                requests.push(SpiderRequest::new(&next_url));
-            }
-        }
+        let requests = page.css("a.next-page").into_iter()
+            .filter_map(|l| l.get_attribute("href"))
+            .map(|href| SpiderRequest::new(&page.urljoin(href.as_str())))
+            .collect();
 
         (items, requests)
-    }
-
-    async fn on_scraped_item(&self, item: serde_json::Value) -> Option<serde_json::Value> {
-        // Filter out items without a price
-        if item.get("price").is_some() { Some(item) } else { None }
     }
 }
 
 #[tokio::main]
 async fn main() {
-    let spider = Arc::new(ProductSpider);
-    let mut session_manager = SessionManager::new(FetcherConfig::default());
-    session_manager.ensure_default();
-
-    let engine = CrawlerEngine::new(spider, session_manager, None);
+    let engine = CrawlerEngine::new(
+        Arc::new(ProductSpider),
+        SessionManager::new(FetcherConfig::default()),
+        None,
+    ).unwrap();
     let result = engine.crawl().await;
-
-    println!("Scraped {} items in {:.1}s",
-        result.items.len(),
-        result.stats.elapsed_seconds());
-    println!("Requests: {}, Failed: {}",
-        result.stats.requests_count,
-        result.stats.failed_requests_count);
-
-    // Export results
-    result.items.to_json("products.json", true).unwrap();
-    result.items.to_jsonl("products.jsonl").unwrap();
+    println!("Scraped {} items", result.items.len());
+    result.items.to_jsonl(std::path::Path::new("products.jsonl")).unwrap();
 }
 ```
 
@@ -417,13 +475,50 @@ async fn main() {
 | `on_start(resuming)` | Before crawl begins |
 | `on_close()` | After crawl ends |
 | `on_error(request, error)` | When a request fails |
-| `on_scraped_item(item)` | Item pipeline -- return `None` to drop |
+| `on_scraped_item(item)` | Item pipeline — return `None` to drop |
 | `is_blocked(response)` | Custom block detection |
 
-> **Memory note:** the scheduler keeps an in-memory dedup set of one
-> fingerprint per unique URL visited (~100 MB per ~1M URLs). For very large
-> or open-ended crawls, set `allowed_domains()` to bound scope so the set does
-> not grow without limit.
+> **Memory note:** the scheduler keeps a dedup set of one fingerprint per unique
+> URL visited (~100 MB per ~1M URLs), persisted in checkpoints so paused crawls
+> resume without re-visiting pages. For very large or open-ended crawls, set
+> `allowed_domains()` to bound scope.
+
+### CrawlSpider, SitemapSpider & LinkExtractor
+
+For the common cases you don't need to implement `Spider` yourself:
+
+**`LinkExtractor`** — declarative URL discovery with regex allow/deny, domain filters (subdomains included), CSS scoping, and a built-in binary-extension deny list (including compound extensions like `.tar.gz`):
+
+```rust
+use rust_scrapling::LinkExtractor;
+
+let extractor = LinkExtractor::new()
+    .allow([r"/articles/"]).unwrap()
+    .deny([r"/tag/"]).unwrap()
+    .allow_domains(["example.com"])       // matches api.example.com too
+    .restrict_css(["#content"]);          // only look inside #content
+
+let urls: Vec<String> = extractor.extract(&response); // absolute, deduped, canonicalized
+```
+
+**`CrawlSpider`** — follow links matching rules, extract items from every page:
+
+```rust
+use rust_scrapling::{CrawlSpider, CrawlRule, LinkExtractor};
+use std::sync::Arc;
+
+let spider = CrawlSpider::builder("articles")
+    .start_urls(["https://example.com/"])
+    .rule(CrawlRule::new(LinkExtractor::new().allow([r"/articles/"]).unwrap()).priority(5))
+    .parse_item(Arc::new(|resp| {
+        resp.css("h1").into_iter()
+            .map(|h| serde_json::json!({ "title": h.text().to_string() }))
+            .collect()
+    }))
+    .build();
+```
+
+**`SitemapSpider`** — seed a crawl from sitemaps (or robots.txt `Sitemap:` directives), recurse through sitemap indexes, and dispatch page URLs through rules — see the [Quick Start](#quick-start) for a complete example.
 
 ---
 
@@ -438,10 +533,8 @@ rust-scrapling fetch https://example.com
 # Extract specific elements with a CSS selector
 rust-scrapling fetch https://example.com --selector "h1"
 
-# Output as HTML
+# Output as HTML or JSON (tag, text, html per element)
 rust-scrapling fetch https://example.com --selector "div.content" --format html
-
-# Output as JSON (tag, text, html per element)
 rust-scrapling fetch https://example.com --selector "a" --format json
 
 # Disable stealth headers
@@ -467,19 +560,24 @@ rust_scrapling/
 |-- parser/                        # HTML parsing engine
 |   |-- selector.rs                # Selector: element wrapper (CSS, text, nav)
 |   |-- selectors.rs               # Selectors: batch operations
+|   |-- adaptive.rs                # Adaptive relocation: save/retrieve/relocate
 |   |-- selector_generation.rs     # Auto-generate CSS/XPath from DOM position
 |   +-- translator.rs              # ::text and ::attr() pseudo-elements
 |
 |-- fetchers/                      # HTTP layer
 |   |-- client.rs                  # Fetcher: async HTTP with retries
 |   |-- config.rs                  # FetcherConfig: builder pattern
+|   |-- encoding.rs                # Charset-aware response decoding
 |   |-- response.rs                # Response: auto-parses to Selector
 |   |-- proxy.rs                   # ProxyRotator: round-robin proxy cycling
+|   |-- search.rs                  # DuckDuckGo helpers (block detection, URL decode)
 |   +-- constants.rs               # User agents, status codes, headers
 |
 +-- spiders/                       # Crawl framework
     |-- spider.rs                  # Spider trait (user-facing API)
     |-- engine.rs                  # CrawlerEngine: async orchestrator
+    |-- links.rs                   # LinkExtractor: URL discovery primitive
+    |-- templates/                 # CrawlSpider + CrawlRule, SitemapSpider
     |-- request.rs                 # SpiderRequest: fingerprinting + priority
     |-- response.rs                # SpiderResponse: parser integration
     |-- result.rs                  # CrawlResult, CrawlStats, ItemList
@@ -487,7 +585,7 @@ rust_scrapling/
     |-- session.rs                 # SessionManager: named HTTP sessions
     |-- robots.rs                  # robots.txt compliance
     |-- cache.rs                   # Dev-mode response caching
-    +-- checkpoint.rs              # Pause/resume persistence
+    +-- checkpoint.rs              # Pause/resume persistence (incl. dedup state)
 ```
 
 ### Design Principles
@@ -499,110 +597,30 @@ rust_scrapling/
 
 ---
 
-## API Reference
-
-### Core Types
-
-| Type | Description |
-|------|-------------|
-| `TextHandler` | String wrapper with `.re()`, `.json()`, `.clean()`, `.strip()`, `.replace_str()` |
-| `TextHandlers` | `Vec<TextHandler>` with batch `.re()`, `.re_first()` |
-| `AttributesHandler` | Read-only attribute map with `.get()`, `.search_values()`, `.json_string()` |
-| `SqliteStorage` | SQLite-backed element storage for adaptive mode |
-
-### Parser Types
-
-| Type | Description |
-|------|-------------|
-| `Selector` | HTML element wrapper -- `.css()`, `.text()`, `.attrib()`, `.children()`, `.parent()`, `.find_by_text()` |
-| `Selectors` | Element collection -- `.css()`, `.filter()`, `.search()`, `.getall()`, `.re()` |
-
-### Fetcher Types
-
-| Type | Description |
-|------|-------------|
-| `Fetcher` | Async HTTP client -- `.get()`, `.post()`, `.put()`, `.delete()` |
-| `FetcherConfig` | Config builder -- `.timeout()`, `.retries()`, `.proxy()`, `.stealth()` |
-| `Response` | HTTP response -- `.selector()`, `.json()`, `.status()`, `.is_blocked()` |
-| `ProxyRotator` | Round-robin proxy rotation |
-
-### Spider Types
-
-| Type | Description |
-|------|-------------|
-| `Spider` (trait) | User implements `.parse()`, configures `start_urls`, concurrency, etc. |
-| `CrawlerEngine<S>` | Async orchestrator -- `.crawl()` returns `CrawlResult` |
-| `SpiderRequest` | Request with fingerprinting, priority, metadata |
-| `CrawlResult` | Final result -- `.items`, `.stats`, `.completed()` |
-| `CrawlStats` | Metrics -- requests, bytes, items, timing, status codes |
-| `ItemList` | Scraped items -- `.to_json()`, `.to_jsonl()` |
-
----
-
 ## Testing
 
 ```bash
-# Run all tests (175 pass, 3 network tests ignored)
-cargo test
-
-# Run with network tests
-cargo test -- --ignored
-
-# Run a specific test module
-cargo test parser_selector
-cargo test core_text_handler
-cargo test integration_test
-
-# Run with logging
-RUST_LOG=debug cargo test
-
-# Check code quality
-cargo clippy -- -W clippy::all
-
-# Build release binary
-cargo build --release
+cargo test                     # 275+ tests, 3 network tests ignored
+cargo test -- --ignored        # include network tests
+cargo clippy --all-targets -- -D warnings
+cargo fmt -- --check
 ```
 
-### Test Coverage
-
-| Module | Tests | Coverage |
-|--------|-------|----------|
-| Core (TextHandler, AttributesHandler, Storage) | 64 | All public methods |
-| Parser (Selector, Selectors, Generation) | 38 | CSS, text, nav, regex, DOM |
-| Fetchers (Config, Client, Response) | 21 | Config, headers, Response struct |
-| Spiders (Request, Scheduler, Result) | 27 | Fingerprinting, dedup, priority, export |
-| Integration | 28 | End-to-end scraping workflows |
-| **Total** | **178** | |
+CI runs the full suite on Linux, macOS, and Windows, plus clippy, rustfmt, MSRV (1.88), and `cargo audit` on every push.
 
 ---
 
 ## Contributing
 
-Contributions are welcome! Here's how to get started:
-
-1. **Fork** the repository
-2. **Create a branch** for your feature (`git checkout -b feature/amazing-feature`)
-3. **Write tests** for your changes
-4. **Run the test suite** (`cargo test && cargo clippy`)
-5. **Commit** with a descriptive message
-6. **Push** and open a Pull Request
-
-### Development Setup
-
-```bash
-git clone https://github.com/Liohtml/RUSTScrapling.git
-cd RUSTScrapling
-cargo build
-cargo test
-```
+Contributions are welcome! Fork, branch, write tests, run `cargo test && cargo clippy`, and open a PR.
 
 ### Areas for Contribution
 
-- **Browser automation** -- Headless Chrome/Playwright integration (like Python Scrapling's `StealthyFetcher`/`DynamicFetcher`)
-- **Adaptive mode** -- Element relocation using similarity scoring (storage layer is ready)
-- **Interactive shell** -- REPL for exploring pages
-- **Performance** -- Benchmarks, SIMD text processing, zero-copy parsing
-- **Documentation** -- More examples, tutorials, API docs
+- **Browser automation** — headless Chrome/Playwright integration (like Python Scrapling's `StealthyFetcher`/`DynamicFetcher`)
+- **MCP server** — a ready-made Model Context Protocol wrapper around the fetch/extract API
+- **Interactive shell** — REPL for exploring pages
+- **Performance** — more benchmarks, SIMD text processing, zero-copy parsing
+- **Documentation** — more examples, tutorials, API docs
 
 ---
 
@@ -619,10 +637,11 @@ at your option.
 
 ## Credits
 
-- **[Scrapling](https://github.com/D4Vinci/Scrapling)** by [Karim Shoair](https://github.com/D4Vinci) -- the original Python framework that inspired this project
-- **[scraper](https://github.com/causal-agent/scraper)** -- HTML parsing and CSS selection in Rust
-- **[reqwest](https://github.com/seanmonstar/reqwest)** -- HTTP client
-- **[tokio](https://tokio.rs/)** -- Async runtime
+- **[Scrapling](https://github.com/D4Vinci/Scrapling)** by [Karim Shoair](https://github.com/D4Vinci) — the original Python framework that inspired this project
+- **[scraper](https://github.com/causal-agent/scraper)** — HTML parsing and CSS selection in Rust
+- **[reqwest](https://github.com/seanmonstar/reqwest)** — HTTP client
+- **[tokio](https://tokio.rs/)** — Async runtime
+- Banner art generated with [Z-Image-Turbo](https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo) on Hugging Face Spaces
 
 ---
 
