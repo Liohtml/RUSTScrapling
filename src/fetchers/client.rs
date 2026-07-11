@@ -242,7 +242,7 @@ impl Fetcher {
                             }
                         }
                     }
-                    let body_text = String::from_utf8_lossy(&bytes).into_owned();
+                    let body_text = crate::fetchers::encoding::decode_body(&bytes, &content_type);
 
                     return Ok(Response::new(
                         status_code,
