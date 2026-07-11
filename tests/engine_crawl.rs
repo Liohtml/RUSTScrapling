@@ -140,3 +140,111 @@ async fn crawl_with_single_concurrency_still_completes() {
     assert_eq!(result.items.len(), urls.len());
     assert_eq!(result.stats.concurrent_requests, 1);
 }
+
+/// Spider that follows a link from each fetched page, used to verify that
+/// the seen set restored from a checkpoint filters already-crawled URLs.
+struct FollowSpider {
+    start: String,
+    follow: String,
+}
+
+#[async_trait]
+impl Spider for FollowSpider {
+    fn name(&self) -> &str {
+        "follow-spider"
+    }
+    fn start_urls(&self) -> Vec<String> {
+        vec![self.start.clone()]
+    }
+    fn development_mode(&self) -> bool {
+        true
+    }
+
+    async fn parse(
+        &self,
+        response: SpiderResponse,
+    ) -> (Vec<serde_json::Value>, Vec<SpiderRequest>) {
+        let item = serde_json::json!({ "url": response.url() });
+        (vec![item], vec![SpiderRequest::new(&self.follow)])
+    }
+}
+
+#[tokio::test]
+async fn resume_restores_seen_set_and_skips_already_crawled_urls() {
+    use rust_scrapling::spiders::checkpoint::{CheckpointData, CheckpointManager};
+
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().to_str().unwrap().to_string();
+    let start = "https://example.com/start".to_string();
+    let follow = "https://example.com/already-crawled".to_string();
+    seed_cache(&base, &[start.clone(), follow.clone()]).await;
+
+    // Simulate a paused crawl that already visited `follow`: its fingerprint
+    // is in the checkpoint's seen set, and `start` is still pending.
+    let follow_fp = SpiderRequest::new(&follow).fingerprint().to_string();
+    let mgr = CheckpointManager::new(&format!("{}/checkpoints", base)).unwrap();
+    mgr.save(&CheckpointData {
+        pending_urls: vec![start.clone()],
+        seen_fingerprints: vec![follow_fp],
+        items_count: 0,
+    })
+    .await
+    .unwrap();
+
+    let spider = Arc::new(FollowSpider {
+        start: start.clone(),
+        follow,
+    });
+    let engine = CrawlerEngine::new(
+        spider,
+        SessionManager::new(FetcherConfig::default()),
+        Some(&base),
+    )
+    .expect("engine builds");
+    let result = engine.crawl().await;
+
+    // Only the pending start URL is processed; the follow link it emits is
+    // filtered by the restored seen set instead of being crawled again.
+    assert!(!result.paused);
+    assert_eq!(result.items.len(), 1, "follow URL must not be re-crawled");
+    let items: Vec<serde_json::Value> = result.items.into_iter().collect();
+    assert_eq!(items[0]["url"], serde_json::json!(start));
+}
+
+#[tokio::test]
+async fn checkpoint_saved_on_pause_includes_seen_fingerprints() {
+    use rust_scrapling::spiders::checkpoint::CheckpointManager;
+
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().to_str().unwrap().to_string();
+    let urls: Vec<String> = (0..3)
+        .map(|i| format!("https://example.com/cp/{}", i))
+        .collect();
+    seed_cache(&base, &urls).await;
+
+    let spider = Arc::new(CacheSpider {
+        urls: urls.clone(),
+        concurrent: 2,
+    });
+    let engine = CrawlerEngine::new(
+        spider,
+        SessionManager::new(FetcherConfig::default()),
+        Some(&base),
+    )
+    .expect("engine builds");
+
+    // Pause immediately: all start requests stay pending, and every enqueued
+    // URL already has its fingerprint in the seen set.
+    engine.request_pause();
+    let result = engine.crawl().await;
+    assert!(result.paused);
+
+    let mgr = CheckpointManager::new(&format!("{}/checkpoints", base)).unwrap();
+    let data = mgr.restore().await.expect("checkpoint written on pause");
+    assert_eq!(data.pending_urls.len(), urls.len());
+    assert_eq!(
+        data.seen_fingerprints.len(),
+        urls.len(),
+        "seen set must be persisted, not saved as empty"
+    );
+}

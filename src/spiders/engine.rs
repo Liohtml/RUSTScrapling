@@ -150,6 +150,11 @@ impl<S: Spider> CrawlerEngine<S> {
             if cp.exists() {
                 if let Some(data) = cp.restore().await {
                     let mut sched = self.scheduler.lock().await;
+                    // Restore the dedup set first so URLs crawled before the
+                    // pause are not re-visited; the pending requests below
+                    // bypass it explicitly via dont_filter since their own
+                    // fingerprints are part of the restored set.
+                    sched.restore_seen(data.seen_fingerprints.iter().cloned());
                     for url in &data.pending_urls {
                         let mut req = SpiderRequest::new(url);
                         req.set_dont_filter(true);
@@ -291,16 +296,14 @@ impl<S: Spider> CrawlerEngine<S> {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
             if let Some(ref cp) = self.checkpoint {
-                let sched = self.scheduler.lock().await;
-                let pending_urls: Vec<String> = sched
-                    .pending_requests()
-                    .iter()
-                    .map(|r| r.url().to_string())
-                    .collect();
+                let (pending_urls, seen_fingerprints) = {
+                    let sched = self.scheduler.lock().await;
+                    sched.snapshot()
+                };
                 let items_count = self.items.lock().await.len() as u64;
                 let data = CheckpointData {
                     pending_urls,
-                    seen_fingerprints: Vec::new(), // Fingerprints are internal to scheduler
+                    seen_fingerprints,
                     items_count,
                 };
                 let _ = cp.save(&data).await;
