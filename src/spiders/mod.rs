@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod checkpoint;
 pub mod engine;
+pub mod links;
 pub mod request;
 pub mod response;
 pub mod result;
@@ -8,3 +9,4 @@ pub mod robots;
 pub mod scheduler;
 pub mod session;
 pub mod spider;
+pub mod templates;
