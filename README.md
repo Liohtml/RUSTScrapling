@@ -25,7 +25,7 @@ Web scraping in three sentences:
 2. **When a site redesigns and your selector breaks**, adaptive mode finds the element again by similarity to what it looked like before — no code change needed.
 3. **When one page isn't enough**, the spider engine crawls whole sites concurrently with rate limiting, deduplication, robots.txt compliance, and pause/resume checkpoints.
 
-It's a faithful Rust port of Python's [Scrapling](https://github.com/D4Vinci/Scrapling) (same concepts, same API names), which means: **~5× faster extraction, ~4× less memory, and a single static binary** — no interpreter, no virtualenv, no cold start. [Benchmarks below.](#how-fast-is-it)
+It's a faithful Rust port of Python's [Scrapling](https://github.com/D4Vinci/Scrapling) (same concepts, same API names), which means: **~5× faster extraction, ~4× less memory, and a single native binary** — no interpreter, no virtualenv, no cold start. [Benchmarks below.](#how-fast-is-it)
 
 | Layer | What it gives you | Key types |
 |-------|-------------------|-----------|
@@ -70,6 +70,8 @@ Add to your `Cargo.toml`:
 [dependencies]
 rust_scrapling = { git = "https://github.com/Liohtml/RUSTScrapling" }
 tokio = { version = "1", features = ["full"] }
+serde_json = "1"          # items are serde_json::Value
+async-trait = "0.1"       # only needed when implementing the Spider trait
 ```
 
 **Requirements:** Rust 1.88+ (edition 2021)
@@ -101,20 +103,28 @@ use rust_scrapling::{CrawlerEngine, SitemapSpider, CrawlRule, LinkExtractor, Fet
 use rust_scrapling::spiders::session::SessionManager;
 use std::sync::Arc;
 
-let spider = SitemapSpider::builder("shop")
-    .sitemap_urls(["https://shop.example.com/robots.txt"]) // finds sitemaps automatically
-    .rule(CrawlRule::new(LinkExtractor::new().allow([r"/products/"]).unwrap()))
-    .parse_item(Arc::new(|resp| {
-        resp.css("h1.product-title")
-            .into_iter()
-            .map(|t| serde_json::json!({ "title": t.text().to_string(), "url": resp.url() }))
-            .collect()
-    }))
-    .build();
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let spider = SitemapSpider::builder("shop")
+        .sitemap_urls(["https://shop.example.com/robots.txt"]) // finds sitemaps automatically
+        .rule(CrawlRule::new(LinkExtractor::new().allow([r"/products/"])?))
+        .parse_item(Arc::new(|resp| {
+            resp.css("h1.product-title")
+                .into_iter()
+                .map(|t| serde_json::json!({ "title": t.text().to_string(), "url": resp.url() }))
+                .collect()
+        }))
+        .build();
 
-let engine = CrawlerEngine::new(Arc::new(spider), SessionManager::new(FetcherConfig::default()), None)?;
-let result = engine.crawl().await;
-result.items.to_jsonl(std::path::Path::new("products.jsonl"))?;
+    let engine = CrawlerEngine::new(
+        Arc::new(spider),
+        SessionManager::new(FetcherConfig::default()),
+        None,
+    )?;
+    let result = engine.crawl().await;
+    result.items.to_jsonl(std::path::Path::new("products.jsonl"))?;
+    Ok(())
+}
 ```
 
 ---
@@ -127,22 +137,24 @@ Measured head-to-head against the original Python Scrapling (v0.4.10, lxml-backe
 |----------|------------------------:|------------------------:|:-------:|
 | Parse + extract 3,000 fields from 1,000 products | 105.7 ms | **19.2 ms** | **~5.5×** |
 | Parse only (build the DOM) | 15.6 ms | 15.7 ms | ~1× |
-| Peak process memory for the same job | 37 MB | **9 MB** | **~4×** |
+| Peak process memory for the same job¹ | 37 MB | **9 MB** | **~4×** |
+
+<sub>¹ Peak RSS of a single parse+extract run: Python via `resource.getrusage(RUSAGE_SELF).ru_maxrss`, Rust via `VmHWM` in `/proc/self/status`. The timing scripts below don't measure memory.</sub>
 
 What the numbers mean, honestly:
 
 - **Raw HTML parsing is a tie** — lxml's C parser is excellent, and html5ever matches it. The Rust win is everything *after* parsing: selector matching, DOM traversal, and text extraction have no interpreter overhead, so end-to-end extraction is ~5.5× faster.
 - **Memory scales the same way**: ~9 MB peak vs ~37 MB for one page. Crawling with 8 concurrent workers, that gap compounds.
 - **Concurrency is where Rust pulls furthest ahead in practice**: the spider engine runs on `tokio` — thousands of in-flight requests on a few OS threads, no GIL, no multiprocessing serialization overhead when fanning work out.
-- **Deployment**: `cargo build --release` produces one static binary. No Python runtime, no dependency resolution at deploy time, millisecond cold starts — which matters for serverless scrapers and agent tools (next section).
+- **Deployment**: `cargo build --release` produces one native binary. No Python runtime, no dependency resolution at deploy time, millisecond cold starts — which matters for serverless scrapers and agent tools (next section).
 
 Reproduce it yourself — the fixture generator and both benchmark scripts are in the repo:
 
 ```bash
-cd scripts/benchmark
-python3 gen_page.py                       # writes the shared page.html fixture
-python3 bench_python.py                   # pip install scrapling first
-cargo run --release --example benchmark   # from the repo root
+# from the repo root:
+python3 scripts/benchmark/gen_page.py      # writes the shared page.html fixture
+python3 scripts/benchmark/bench_python.py  # pip install scrapling first
+cargo run --release --example benchmark
 ```
 
 ---
@@ -154,7 +166,7 @@ Scraping is one of the most common tools an LLM agent calls — and one of the m
 - **Latency lives in your agent loop.** 19 ms instead of 106 ms per page extraction matters when an agent chains fetch → extract → reason several times per task.
 - **Adaptive selectors reduce silent breakage.** When a target site redesigns, `css_adaptive` relocates the element by similarity instead of returning nothing — your agent's tool keeps working instead of feeding it empty results.
 - **Deterministic, structured output.** Selectors + JSON out, no LLM tokens spent parsing HTML. Feed the model *data*, not markup.
-- **One static binary.** Trivially shippable as a sandboxed tool next to your agent runtime — no Python environment in the container.
+- **One native binary.** Trivially shippable as a sandboxed tool next to your agent runtime — no Python environment in the container.
 
 ### Pattern 1 — expose it as a tool (function calling / MCP)
 
@@ -174,10 +186,15 @@ pub async fn scrape_tool(url: &str, selector: &str) -> anyhow::Result<serde_json
         .css(selector)
         .into_iter()
         .map(|el| {
+            let attrs: serde_json::Map<String, serde_json::Value> = el
+                .attrib()
+                .iter()
+                .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
+                .collect();
             serde_json::json!({
                 "tag": el.tag(),
                 "text": el.get_all_text(" ", true, &["script", "style"], None).to_string(),
-                "attrs": el.attrib().json_string(),
+                "attrs": attrs,
             })
         })
         .collect();
@@ -324,7 +341,8 @@ let outer = element.outer_html();
 ### DOM Navigation
 
 ```rust
-let item = page.css("li.product").first().unwrap();
+let products = page.css("li.product");
+let item = products.first().unwrap();
 
 let list = item.parent().unwrap();
 let children = list.children();
@@ -342,7 +360,8 @@ let matched = page.find_by_regex(r"Item \d+", true, false);
 ### Regex Extraction
 
 ```rust
-let price_el = page.css("span.price").first().unwrap();
+let price_els = page.css("span.price");
+let price_el = price_els.first().unwrap();
 
 let prices = price_el.re(r"\$(\d+\.\d+)", true, false, true);        // all matches
 let first = price_el.re_first(r"\$(\d+\.\d+)", true, false, true);   // first match
@@ -591,7 +610,7 @@ rust_scrapling/
 ### Design Principles
 
 - **Each layer is independent.** Use just the parser without fetchers. Use fetchers without spiders. Compose as needed.
-- **Zero hidden allocations.** `Selector` uses `Rc<Html>` to share the parsed tree. Child selectors point into the same tree.
+- **Cheap tree sharing.** `Selector` uses `Rc<Html>` to share the parsed tree — child selectors point into the same tree instead of copying it.
 - **Async-first.** The fetcher and spider layers are built on `tokio` for high-concurrency crawling.
 - **Scrapy-compatible API names.** `css()`, `text()`, `re()`, `re_first()`, `get()`, `getall()` mirror Scrapy/Parsel conventions.
 

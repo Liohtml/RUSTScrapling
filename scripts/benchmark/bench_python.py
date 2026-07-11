@@ -1,11 +1,13 @@
 """Benchmark Python Scrapling: parse + CSS select + text/attr extraction."""
 
+import pathlib
 import statistics
 import time
 
 from scrapling.parser import Selector
 
-html = open("page.html").read()
+# The fixture lives next to this script (written there by gen_page.py).
+html = (pathlib.Path(__file__).resolve().parent / "page.html").read_text()
 
 N = 30
 

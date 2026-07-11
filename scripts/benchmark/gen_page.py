@@ -1,5 +1,6 @@
 """Generate the shared benchmark page: 1000 product cards, ~600 KB."""
 
+import pathlib
 import random
 
 random.seed(42)
@@ -26,6 +27,8 @@ html = f"""<!doctype html>
 <footer><p>Benchmark fixture page</p></footer>
 </body></html>"""
 
-with open("page.html", "w") as f:
-    f.write(html)
-print(f"page.html written: {len(html)/1024:.0f} KB")
+# Write next to this script so the fixture lands in scripts/benchmark/
+# regardless of the caller's working directory.
+out_path = pathlib.Path(__file__).resolve().parent / "page.html"
+out_path.write_text(html)
+print(f"{out_path} written: {len(html)/1024:.0f} KB")
