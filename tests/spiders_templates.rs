@@ -285,3 +285,100 @@ async fn sitemap_spider_without_rules_follows_all_urls() {
     let result = engine.crawl().await;
     assert_eq!(result.items.len(), 2, "all sitemap URLs are followed");
 }
+
+#[test]
+fn self_closing_alternate_links_do_not_swallow_locs() {
+    // html5ever treats a self-closing <xhtml:link/> as an open tag, nesting
+    // whatever follows inside it. Descendant traversal must still find every
+    // loc and alternate regardless of element order.
+    let link_first = r#"<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+        <url>
+          <xhtml:link rel="alternate" hreflang="de" href="https://example.com/de"/>
+          <loc>https://example.com/en</loc>
+        </url>
+      </urlset>"#;
+    let plain = SitemapSpider::builder("sm").build();
+    assert_eq!(
+        plain.parse_sitemap_body(link_first).urls,
+        vec!["https://example.com/en"],
+        "loc after a self-closing alternate link must not be lost"
+    );
+
+    // Multiple alternates: the second link nests inside the first under
+    // html5ever, but all alternates and the loc must survive.
+    let multi = r#"<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+        <url>
+          <loc>https://example.com/en</loc>
+          <xhtml:link rel="alternate" hreflang="de" href="https://example.com/de"/>
+          <xhtml:link rel="alternate" hreflang="fr" href="https://example.com/fr"/>
+        </url>
+      </urlset>"#;
+    let with = SitemapSpider::builder("sm")
+        .sitemap_alternate_links(true)
+        .build();
+    let urls = with.parse_sitemap_body(multi).urls;
+    assert!(urls.contains(&"https://example.com/en".to_string()));
+    assert!(urls.contains(&"https://example.com/de".to_string()));
+    assert!(
+        urls.contains(&"https://example.com/fr".to_string()),
+        "second alternate must not be swallowed by the first"
+    );
+}
+
+#[tokio::test]
+async fn relative_sitemap_urls_are_resolved_against_response_url() {
+    use rust_scrapling::spiders::spider::Spider;
+
+    let spider = SitemapSpider::builder("sm").build();
+
+    // Relative loc entries in a urlset.
+    let resp = spider_response(
+        "https://example.com/sitemap.xml",
+        r#"<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+             <url><loc>/page1</loc></url>
+           </urlset>"#,
+    );
+    let (_, requests) = spider.parse(resp).await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].url(), "https://example.com/page1");
+
+    // Relative Sitemap directive in robots.txt, plus an inline comment.
+    let resp = spider_response(
+        "https://example.com/robots.txt",
+        "User-agent: *\nSitemap: /sitemap.xml # primary\n",
+    );
+    let (_, requests) = spider.parse(resp).await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].url(), "https://example.com/sitemap.xml");
+}
+
+#[tokio::test]
+async fn content_page_mentioning_urlset_is_not_misclassified() {
+    use rust_scrapling::spiders::spider::Spider;
+
+    let spider = SitemapSpider::builder("sm")
+        .parse_item(Arc::new(|resp: &SpiderResponse| {
+            vec![serde_json::json!({ "url": resp.url() })]
+        }))
+        .build();
+
+    let resp = spider_response(
+        "https://example.com/blog/sitemaps-explained",
+        r#"<!doctype html><html><body>
+            <h1>All about sitemaps</h1>
+            <script>var example = "<urlset xmlns='x'>";</script>
+        </body></html>"#,
+    );
+    let (items, requests) = spider.parse(resp).await;
+    assert_eq!(items.len(), 1, "content page must still yield its items");
+    assert!(requests.is_empty());
+
+    // A real sitemap with an XML prolog and leading comment still parses.
+    let resp = spider_response(
+        "https://example.com/sitemap.xml",
+        "<?xml version=\"1.0\"?>\n<!-- generated -->\n<urlset><url><loc>https://example.com/a</loc></url></urlset>",
+    );
+    let (items, requests) = spider.parse(resp).await;
+    assert!(items.is_empty());
+    assert_eq!(requests.len(), 1);
+}

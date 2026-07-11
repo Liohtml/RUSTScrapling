@@ -206,3 +206,38 @@ fn area_tags_are_extracted_by_default() {
     let urls = LinkExtractor::new().extract(&resp);
     assert_eq!(urls, vec!["https://example.com/mapped"]);
 }
+
+#[test]
+fn document_order_is_preserved_across_tags() {
+    let resp = page(
+        "https://example.com/",
+        r#"<map><area href="/first"></map><a href="/second">a</a><map><area href="/third"></map>"#,
+    );
+    let urls = LinkExtractor::new().extract(&resp);
+    assert_eq!(
+        urls,
+        vec![
+            "https://example.com/first",
+            "https://example.com/second",
+            "https://example.com/third",
+        ]
+    );
+}
+
+#[test]
+fn canonicalize_drops_empty_query_and_preserves_raw_bytes() {
+    // `/p?` must dedupe with `/p`.
+    assert_eq!(
+        canonicalize_url("https://example.com/p?", false),
+        "https://example.com/p"
+    );
+    assert_eq!(
+        canonicalize_url("https://example.com/p?&&", false),
+        "https://example.com/p"
+    );
+    // Percent-escapes that are not valid UTF-8 survive canonicalization.
+    assert_eq!(
+        canonicalize_url("https://example.com/?a=%FF", false),
+        "https://example.com/?a=%FF"
+    );
+}

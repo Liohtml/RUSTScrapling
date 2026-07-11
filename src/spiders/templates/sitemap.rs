@@ -60,11 +60,12 @@ impl SitemapSpider {
         SitemapSpiderBuilder::new(name)
     }
 
-    /// Extract `Sitemap:` directives from a robots.txt body.
+    /// Extract `Sitemap:` directives from a robots.txt body. Inline `#`
+    /// comments are stripped before matching.
     fn robots_sitemaps(body: &str) -> Vec<String> {
         body.lines()
             .filter_map(|line| {
-                let line = line.trim();
+                let line = line.split('#').next().unwrap_or("").trim();
                 let rest = line
                     .get(..8)
                     .filter(|p| p.eq_ignore_ascii_case("sitemap:"))
@@ -75,15 +76,23 @@ impl SitemapSpider {
     }
 
     /// Parse a sitemap body and return its URLs and any child sitemaps.
+    ///
+    /// Descendant (not child) traversal is used throughout: html5ever treats
+    /// a self-closing unknown element like `<xhtml:link/>` as an *open* tag,
+    /// nesting everything that follows it inside — a `<loc>` after such a
+    /// link would be invisible to a direct-children walk. Descendant search
+    /// plus dedup is robust to that re-nesting.
     pub fn parse_sitemap_body(&self, body: &str) -> SitemapResult {
         let root = Selector::from_html(body);
 
-        let index_locs: Vec<String> = root
-            .css("sitemapindex sitemap > loc")
-            .into_iter()
-            .map(|el| el.text().to_string().trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut index_locs: Vec<String> = Vec::new();
+        for el in root.css("sitemapindex loc") {
+            let text = el.text().to_string().trim().to_string();
+            if !text.is_empty() && seen.insert(text.clone()) {
+                index_locs.push(text);
+            }
+        }
         if !index_locs.is_empty() {
             return SitemapResult {
                 urls: Vec::new(),
@@ -91,22 +100,20 @@ impl SitemapSpider {
             };
         }
 
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut urls: Vec<String> = Vec::new();
-        for url_el in root.css("urlset url") {
-            for child in url_el.children() {
-                let tag = child.tag().to_string();
-                if tag == "loc" {
-                    let text = child.text().to_string().trim().to_string();
-                    if !text.is_empty() {
-                        urls.push(text);
-                    }
-                } else if self.sitemap_alternate_links && (tag == "link" || tag.ends_with(":link"))
-                {
-                    if let Some(href) = child.get_attribute("href") {
-                        let href = href.to_string().trim().to_string();
-                        if !href.is_empty() {
-                            urls.push(href);
-                        }
+        for el in root.css("urlset url *") {
+            let tag = el.tag().to_string();
+            if tag == "loc" {
+                let text = el.text().to_string().trim().to_string();
+                if !text.is_empty() && seen.insert(text.clone()) {
+                    urls.push(text);
+                }
+            } else if self.sitemap_alternate_links && (tag == "link" || tag.ends_with(":link")) {
+                if let Some(href) = el.get_attribute("href") {
+                    let href = href.to_string().trim().to_string();
+                    if !href.is_empty() && seen.insert(href.clone()) {
+                        urls.push(href);
                     }
                 }
             }
@@ -138,9 +145,46 @@ impl SitemapSpider {
             .unwrap_or(false)
     }
 
+    /// A document is a sitemap only when `<urlset>`/`<sitemapindex>` is the
+    /// *root* element (after optional BOM, XML prolog, and comments).
+    /// Scanning the whole body would misclassify HTML content pages that
+    /// merely mention `<urlset` in a script or code sample, silently
+    /// dropping their items.
     fn looks_like_sitemap(body: &str) -> bool {
-        let head: String = body.chars().take(4096).collect::<String>().to_lowercase();
-        head.contains("<urlset") || head.contains("<sitemapindex")
+        let mut rest = body.trim_start_matches('\u{feff}').trim_start();
+        loop {
+            if let Some(after) = rest.strip_prefix("<?") {
+                match after.find("?>") {
+                    Some(i) => rest = after[i + 2..].trim_start(),
+                    None => return false,
+                }
+            } else if let Some(after) = rest.strip_prefix("<!--") {
+                match after.find("-->") {
+                    Some(i) => rest = after[i + 3..].trim_start(),
+                    None => return false,
+                }
+            } else {
+                break;
+            }
+        }
+        let head: String = rest.chars().take(16).collect::<String>().to_lowercase();
+        head.starts_with("<urlset") || head.starts_with("<sitemapindex")
+    }
+
+    /// Resolve a possibly-relative URL against the response URL, mirroring
+    /// upstream's `response.follow()` semantics. Returns `None` when neither
+    /// parse nor join yields a usable URL.
+    fn absolutize(base: &str, candidate: &str) -> Option<String> {
+        match Url::parse(candidate) {
+            Ok(u) => Some(u.to_string()),
+            Err(_) => match Url::parse(base).ok()?.join(candidate) {
+                Ok(u) => Some(u.to_string()),
+                Err(_) => {
+                    log::debug!("Skipping unresolvable sitemap URL {candidate:?}");
+                    None
+                }
+            },
+        }
     }
 }
 
@@ -180,7 +224,11 @@ impl Spider for SitemapSpider {
             if sitemaps.is_empty() {
                 log::warn!("No Sitemaps found in {}", response.url());
             }
-            let requests = sitemaps.iter().map(|u| SpiderRequest::new(u)).collect();
+            let requests = sitemaps
+                .iter()
+                .filter_map(|u| Self::absolutize(response.url(), u))
+                .map(|u| SpiderRequest::new(&u))
+                .collect();
             return (Vec::new(), requests);
         }
 
@@ -189,15 +237,21 @@ impl Spider for SitemapSpider {
             let result = self.parse_sitemap_body(response.text());
             let mut requests: Vec<SpiderRequest> = Vec::new();
             for child in &result.sitemaps {
+                let Some(child) = Self::absolutize(response.url(), child) else {
+                    continue;
+                };
                 if let Some(filter) = &self.sitemap_follow {
-                    if !filter.matches(child) {
+                    if !filter.matches(&child) {
                         continue;
                     }
                 }
-                requests.push(SpiderRequest::new(child));
+                requests.push(SpiderRequest::new(&child));
             }
             for url in &result.urls {
-                if let Some(req) = self.dispatch(url, &response) {
+                let Some(url) = Self::absolutize(response.url(), url) else {
+                    continue;
+                };
+                if let Some(req) = self.dispatch(&url, &response) {
                     requests.push(req);
                 }
             }

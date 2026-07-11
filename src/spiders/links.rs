@@ -234,48 +234,49 @@ impl LinkExtractor {
         let base = Url::parse(response.url()).ok();
         let mut seen = HashSet::new();
         let mut out = Vec::new();
+        // One selector-list query per scope ("a, area") so results come back
+        // in true document order rather than grouped by tag.
+        let tag_selector = self.tags.join(", ");
         for scope in &scopes {
-            for tag in &self.tags {
-                for el in scope.css(tag) {
-                    for attr in &self.attrs {
-                        let Some(value) = el.get_attribute(attr) else {
+            for el in scope.css(&tag_selector) {
+                for attr in &self.attrs {
+                    let Some(value) = el.get_attribute(attr) else {
+                        continue;
+                    };
+                    let mut candidate = value.to_string();
+                    if self.strip {
+                        candidate = candidate.trim().to_string();
+                        if candidate.is_empty() {
                             continue;
-                        };
-                        let mut candidate = value.to_string();
-                        if self.strip {
-                            candidate = candidate.trim().to_string();
-                            if candidate.is_empty() {
+                        }
+                    }
+                    let absolute = match &base {
+                        Some(b) => match b.join(&candidate) {
+                            Ok(u) => u.to_string(),
+                            Err(_) => {
+                                log::debug!("Skipping the extraction of bad URL {candidate:?}");
                                 continue;
                             }
-                        }
-                        let absolute = match &base {
-                            Some(b) => match b.join(&candidate) {
-                                Ok(u) => u.to_string(),
-                                Err(_) => {
-                                    log::debug!("Skipping the extraction of bad URL {candidate:?}");
-                                    continue;
-                                }
-                            },
-                            None => candidate,
-                        };
-                        let Some(processed) = self
-                            .process
-                            .as_ref()
-                            .map_or(Some(absolute.clone()), |f| f(absolute))
-                        else {
-                            continue;
-                        };
-                        let finalized = if self.canonicalize {
-                            canonicalize_url(&processed, self.keep_fragment)
-                        } else {
-                            processed
-                        };
-                        if !self.url_passes(&finalized) {
-                            continue;
-                        }
-                        if seen.insert(finalized.clone()) {
-                            out.push(finalized);
-                        }
+                        },
+                        None => candidate,
+                    };
+                    let Some(processed) = self
+                        .process
+                        .as_ref()
+                        .map_or(Some(absolute.clone()), |f| f(absolute))
+                    else {
+                        continue;
+                    };
+                    let finalized = if self.canonicalize {
+                        canonicalize_url(&processed, self.keep_fragment)
+                    } else {
+                        processed
+                    };
+                    if !self.url_passes(&finalized) {
+                        continue;
+                    }
+                    if seen.insert(finalized.clone()) {
+                        out.push(finalized);
                     }
                 }
             }
@@ -362,22 +363,27 @@ fn extension_chains(url: &str) -> Vec<String> {
         .collect()
 }
 
-/// Canonicalize a URL: sort query pairs by key/value and drop the fragment
-/// unless `keep_fragment`. Unparseable URLs are returned unchanged.
+/// Canonicalize a URL: sort query parameters and drop the fragment unless
+/// `keep_fragment`. Unparseable URLs are returned unchanged.
+///
+/// Query parameters are sorted as *raw* `&`-separated segments (empty
+/// segments dropped) rather than decoded key/value pairs, so percent-encoded
+/// bytes that are not valid UTF-8 (e.g. `%FF`) survive canonicalization
+/// instead of being mangled through a decode/re-encode round trip. An empty
+/// query (`/p?`) is normalized away so it dedupes with `/p`.
 pub fn canonicalize_url(url: &str, keep_fragment: bool) -> String {
     let Ok(mut parsed) = Url::parse(url) else {
         return url.to_string();
     };
-    let mut pairs: Vec<(String, String)> = parsed
-        .query_pairs()
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .collect();
-    if !pairs.is_empty() {
-        pairs.sort();
-        parsed
-            .query_pairs_mut()
-            .clear()
-            .extend_pairs(pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    if let Some(query) = parsed.query() {
+        let mut segments: Vec<&str> = query.split('&').filter(|s| !s.is_empty()).collect();
+        if segments.is_empty() {
+            parsed.set_query(None);
+        } else {
+            segments.sort_unstable();
+            let sorted = segments.join("&");
+            parsed.set_query(Some(&sorted));
+        }
     }
     if !keep_fragment {
         parsed.set_fragment(None);
