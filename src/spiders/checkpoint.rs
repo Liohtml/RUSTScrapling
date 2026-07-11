@@ -25,7 +25,10 @@ impl CheckpointManager {
     pub async fn save(&self, data: &CheckpointData) -> Result<(), std::io::Error> {
         let file_path = self.checkpoint_dir.join("checkpoint.json");
         let dir = self.checkpoint_dir.clone();
-        let json = serde_json::to_string_pretty(data).map_err(std::io::Error::other)?;
+        // Compact encoding: with the seen set persisted, checkpoints grow
+        // with the crawl (one fingerprint per unique URL), and pretty-printed
+        // indentation roughly doubles the file size for no benefit.
+        let json = serde_json::to_string(data).map_err(std::io::Error::other)?;
         // The atomic temp-file + persist write is synchronous, so run it on the
         // blocking pool to avoid stalling the async runtime (this runs in the
         // main crawl loop). `persist` does an atomic replace on POSIX (rename)

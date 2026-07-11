@@ -151,10 +151,12 @@ impl<S: Spider> CrawlerEngine<S> {
                 if let Some(data) = cp.restore().await {
                     let mut sched = self.scheduler.lock().await;
                     // Restore the dedup set first so URLs crawled before the
-                    // pause are not re-visited; the pending requests below
-                    // bypass it explicitly via dont_filter since their own
-                    // fingerprints are part of the restored set.
-                    sched.restore_seen(data.seen_fingerprints.iter().cloned());
+                    // pause are not re-visited. The pending requests below
+                    // bypass it explicitly via dont_filter: most of their
+                    // fingerprints are in the restored set already, and ones
+                    // that are not (originally enqueued with dont_filter,
+                    // e.g. blocked retries) must be re-crawled anyway.
+                    sched.restore_seen(data.seen_fingerprints);
                     for url in &data.pending_urls {
                         let mut req = SpiderRequest::new(url);
                         req.set_dont_filter(true);
