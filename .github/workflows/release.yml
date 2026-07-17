@@ -15,8 +15,8 @@ name: Release
 #     Publishing -> GitHub (repository Liohtml/RUSTScrapling, workflow
 #     release.yml). This is configured for rust_scrapling.
 #  2. Fallback: the CARGO_REGISTRY_TOKEN repository secret, if set.
-# With neither available, the tag + GitHub release still happen and
-# publishing is skipped with a notice.
+# With neither available the publish step FAILS the run — a green run
+# must mean the version is fully released.
 
 on:
   push:
@@ -50,23 +50,32 @@ jobs:
           else
             echo "tag_new=true" >> "$GITHUB_OUTPUT"
           fi
-          # A 404 from the sparse index (crate or version unknown) means
-          # "not published yet" — curl -f fails and the branch below runs.
-          if curl -fsS "https://index.crates.io/ru/st/rust_scrapling" 2>/dev/null \
-              | grep -q "\"vers\":\"$version\""; then
+          # Sparse-index check: 200 with the version listed -> published;
+          # 200 without it, or 404 (brand-new crate) -> not published yet.
+          # Anything else is a transient index problem — fail rather than
+          # guess, so we never mis-gate on a network blip.
+          index="$RUNNER_TEMP/index.json"
+          code=$(curl -sS -o "$index" -w '%{http_code}' \
+            "https://index.crates.io/ru/st/rust_scrapling") || code=000
+          if [ "$code" = "200" ] && grep -qF "\"vers\":\"$version\"" "$index"; then
             echo "rust_scrapling $version is already on crates.io — skipping publish."
             echo "crates_new=false" >> "$GITHUB_OUTPUT"
-          else
+          elif [ "$code" = "200" ] || [ "$code" = "404" ]; then
             echo "crates_new=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::index.crates.io returned HTTP $code — cannot determine publish state."
+            exit 1
           fi
 
       - name: Extract CHANGELOG section
         if: steps.version.outputs.tag_new == 'true'
         # Notes are written to $RUNNER_TEMP, NOT the working tree: a dirty
         # checkout would make `cargo publish --locked` refuse to run.
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          version="${{ steps.version.outputs.version }}"
+          version="$VERSION"
           notes="$RUNNER_TEMP/release-notes.md"
           awk -v ver="$version" '$0 ~ "^## \\[" ver "\\]" {flag=1; next} /^## \[/ {flag=0} flag' \
             CHANGELOG.md > "$notes"
@@ -84,9 +93,10 @@ jobs:
         if: steps.version.outputs.tag_new == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          version="${{ steps.version.outputs.version }}"
+          version="$VERSION"
           gh release create "v$version" \
             --target "$GITHUB_SHA" \
             --title "v$version" \
@@ -109,12 +119,19 @@ jobs:
         env:
           OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
           SECRET_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG_NEW: ${{ steps.version.outputs.tag_new }}
         run: |
           set -euo pipefail
           CARGO_REGISTRY_TOKEN="${OIDC_TOKEN:-${SECRET_TOKEN:-}}"
           export CARGO_REGISTRY_TOKEN
           if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
-            echo "::notice::No crates.io credentials (neither OIDC trusted publishing nor CARGO_REGISTRY_TOKEN secret) — skipping publish."
-            exit 0
+            echo "::error::No crates.io credentials (neither OIDC trusted publishing nor the CARGO_REGISTRY_TOKEN secret) — cannot publish v$VERSION."
+            exit 1
+          fi
+          # Heal path: the tag predates this run, so publish exactly the
+          # tagged source rather than whatever HEAD has moved on to.
+          if [ "$TAG_NEW" = "false" ]; then
+            git checkout -q "v$VERSION"
           fi
           cargo publish --locked
