@@ -10,6 +10,11 @@ on:
         description: "Only list the branches that would be deleted"
         type: boolean
         default: false
+  # Fallback trigger for environments whose credentials cannot dispatch
+  # workflows: merging a commit whose message contains [cleanup-branches]
+  # runs the janitor once.
+  push:
+    branches: [master]
 
 permissions:
   contents: write
@@ -17,6 +22,7 @@ permissions:
 
 jobs:
   cleanup:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[cleanup-branches]')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
