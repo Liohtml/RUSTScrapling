@@ -19,9 +19,10 @@ rust-version = "1.88"
 exclude = ["docs/", "scripts/", ".github/", ".claude/"]
 
 [dependencies]
-scraper = "0.22"
-ego-tree = "0.10"
-markup5ever = "0.14"
+scraper = "0.27"
+# ego-tree must stay in lockstep with the version scraper uses, since
+# Selector stores ego_tree::NodeId directly.
+ego-tree = "0.11"
 cssparser = "0.37"
 reqwest = { version = "0.12", features = ["json", "cookies", "gzip", "brotli", "deflate", "rustls-tls"] }
 http = "1"
