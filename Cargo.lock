@@ -1689,6 +1689,7 @@ dependencies = [
  "log",
  "markup5ever",
  "once_cell",
+ "percent-encoding",
  "regex",
  "reqwest",
  "rusqlite",
