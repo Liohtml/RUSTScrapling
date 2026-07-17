@@ -10,13 +10,55 @@ use rust_scrapling::spiders::templates::ShopifySpider;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-const HOST: &str = "example-shop.com";
+// Reserved TLD (RFC 2606): a cache miss can never reach a real host.
+const HOST: &str = "example-shop.test";
 
 fn collections_page() -> serde_json::Value {
     serde_json::json!({
         "collections": [
             {"handle": "lipsticks", "title": "Lipsticks", "products_count": 2},
+            {"handle": "brow-pencils", "title": "Brow Pencils", "products_count": 1},
             {"handle": "empty-collection", "title": "Empty", "products_count": 0},
+        ]
+    })
+}
+
+fn lipstick_page_2() -> serde_json::Value {
+    serde_json::json!({
+        "products": [
+            {
+                "id": 3,
+                "title": "Lip Gloss",
+                "handle": "lip-gloss",
+                "vendor": "Acme",
+                "body_html": null,
+                "images": [],
+                "variants": [
+                    // Numeric price/compare_at_price: some stores serialize
+                    // numbers instead of strings — they must pass through.
+                    {"id": 31, "title": "Default Title", "sku": "GLOSS-1",
+                     "price": 5.5, "available": true, "compare_at_price": 8},
+                ],
+            },
+        ]
+    })
+}
+
+fn brow_page() -> serde_json::Value {
+    serde_json::json!({
+        "products": [
+            {
+                "id": 2,
+                "title": "Brow Pencil",
+                "handle": "brow-pencil",
+                "vendor": "Acme",
+                "body_html": null,
+                "images": [],
+                "variants": [
+                    {"id": 21, "title": "Default Title", "sku": "BROW-1",
+                     "price": "7.50", "available": true},
+                ],
+            },
         ]
     })
 }
@@ -36,18 +78,6 @@ fn products_page() -> serde_json::Value {
                      "available": true, "compare_at_price": "12.00"},
                     {"id": 12, "title": "Nude", "sku": null, "price": "9.00",
                      "available": false, "compare_at_price": "0.00"},
-                ],
-            },
-            {
-                "id": 2,
-                "title": "Brow Pencil",
-                "handle": "brow-pencil",
-                "vendor": "Acme",
-                "body_html": null,
-                "images": [],
-                "variants": [
-                    {"id": 21, "title": "Default Title", "sku": "BROW-1",
-                     "price": "7.50", "available": true},
                 ],
             },
         ]
@@ -90,8 +120,21 @@ async fn crawl_store() -> Vec<serde_json::Value> {
                 url("/collections/lipsticks/products.json?page=1&limit=250"),
                 products_page(),
             ),
+            // Non-empty page 2: pagination must continue to page 3.
             (
                 url("/collections/lipsticks/products.json?page=2&limit=250"),
+                lipstick_page_2(),
+            ),
+            (
+                url("/collections/lipsticks/products.json?page=3&limit=250"),
+                serde_json::json!({"products": []}),
+            ),
+            (
+                url("/collections/brow-pencils/products.json?page=1&limit=250"),
+                brow_page(),
+            ),
+            (
+                url("/collections/brow-pencils/products.json?page=2&limit=250"),
                 serde_json::json!({"products": []}),
             ),
         ],
@@ -111,7 +154,11 @@ async fn crawl_store() -> Vec<serde_json::Value> {
 #[tokio::test]
 async fn extracts_one_item_per_variant_from_the_json_api() {
     let mut items = crawl_store().await;
-    assert_eq!(items.len(), 3, "two lipstick variants + one brow pencil");
+    assert_eq!(
+        items.len(),
+        4,
+        "two lipstick variants + page-2 gloss + one brow pencil"
+    );
     items.sort_by_key(|i| i["identifier"].as_i64());
 
     // Variant with its own title: appended to the product name.
@@ -132,7 +179,7 @@ async fn extracts_one_item_per_variant_from_the_json_api() {
     );
     assert_eq!(
         items[0]["url"],
-        "https://example-shop.com/collections/lipsticks/products/matte-lipstick"
+        "https://example-shop.test/collections/lipsticks/products/matte-lipstick"
     );
     assert_eq!(items[0]["description"], "A matte lipstick", "tags stripped");
     assert_eq!(items[0]["old_price"], "12.00");
@@ -143,10 +190,17 @@ async fn extracts_one_item_per_variant_from_the_json_api() {
     assert_eq!(items[1]["old_price"], "");
     assert_eq!(items[1]["sku"], "", "null sku becomes empty string");
 
-    // "Default Title" variant: product name used as-is.
+    // "Default Title" variant: product name used as-is; hyphenated handle
+    // becomes a title-cased category.
     assert_eq!(items[2]["name"], "Brow Pencil");
+    assert_eq!(items[2]["category"], "Brow Pencils");
     assert_eq!(items[2]["image_url"], "", "no images");
     assert_eq!(items[2]["description"], "", "null body_html");
+
+    // Page-2 product: numeric prices pass through with their JSON type.
+    assert_eq!(items[3]["name"], "Lip Gloss");
+    assert_eq!(items[3]["price"], serde_json::json!(5.5));
+    assert_eq!(items[3]["old_price"], serde_json::json!(8));
 }
 
 #[tokio::test]
@@ -160,7 +214,10 @@ async fn empty_collections_are_not_requested() {
         &[
             (
                 url("/collections.json?page=1&limit=250"),
-                collections_page(),
+                serde_json::json!({"collections": [
+                    {"handle": "lipsticks", "title": "Lipsticks", "products_count": 2},
+                    {"handle": "empty-collection", "title": "Empty", "products_count": 0},
+                ]}),
             ),
             (
                 url("/collections.json?page=2&limit=250"),
@@ -237,7 +294,7 @@ async fn variants_seen_in_multiple_collections_are_emitted_once() {
     let result = engine.crawl().await;
     assert_eq!(
         result.items.len(),
-        3,
+        2,
         "duplicate variant ids across collections are deduplicated"
     );
 }

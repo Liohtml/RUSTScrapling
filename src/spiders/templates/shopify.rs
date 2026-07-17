@@ -44,6 +44,17 @@ pub struct ShopifySpider {
 
 const PAGE_LIMIT: u32 = 250;
 
+/// Upstream emits these fields with whatever JSON type the store returns
+/// (prices are usually strings, but some stores serialize numbers); only a
+/// missing/null value becomes an empty string.
+fn raw_or_empty(value: &serde_json::Value) -> serde_json::Value {
+    if value.is_null() {
+        serde_json::json!("")
+    } else {
+        value.clone()
+    }
+}
+
 impl ShopifySpider {
     /// `target` may be a bare domain (`shop.example.com`) or any URL on the
     /// store (`https://shop.example.com/some/page`).
@@ -51,7 +62,9 @@ impl ShopifySpider {
         ShopifySpiderBuilder::new(target)
     }
 
-    /// Extract the host from a domain or URL string.
+    /// Extract the host (with any explicit port) from a domain or URL
+    /// string — the equivalent of Python's `urlparse(...).netloc`, which is
+    /// what upstream stores. Like upstream, requests always go over https.
     fn host_of(target: &str) -> String {
         let candidate = if target.contains("://") {
             target.to_string()
@@ -60,7 +73,12 @@ impl ShopifySpider {
         };
         Url::parse(&candidate)
             .ok()
-            .and_then(|u| u.host_str().map(|h| h.to_string()))
+            .and_then(|u| {
+                u.host_str().map(|h| match u.port() {
+                    Some(port) => format!("{h}:{port}"),
+                    None => h.to_string(),
+                })
+            })
             .unwrap_or_else(|| target.trim().to_string())
     }
 
@@ -94,10 +112,20 @@ impl ShopifySpider {
     }
 
     /// `/collections/{handle}/products.json` → `Some(handle)`.
+    ///
+    /// The segment is percent-decoded: non-ASCII handles (common on
+    /// Japanese/Cyrillic storefronts) are percent-encoded in the final URL
+    /// the HTTP client records, but item fields derived from the handle
+    /// must use the human-readable form, like upstream's `meta["handle"]`.
     fn products_handle(url: &Url) -> Option<String> {
         let mut segments = url.path_segments()?;
         match (segments.next(), segments.next(), segments.next()) {
-            (Some("collections"), Some(handle), Some("products.json")) => Some(handle.to_string()),
+            (Some("collections"), Some(handle), Some("products.json")) => Some(
+                percent_encoding::percent_decode_str(handle)
+                    .decode_utf8()
+                    .map(|s| s.into_owned())
+                    .unwrap_or_else(|_| handle.to_string()),
+            ),
             _ => None,
         }
     }
@@ -167,25 +195,44 @@ impl ShopifySpider {
                 format!("{product_title} - {variant_title}")
             };
 
-            // "lipstick-sets" -> "Lipstick Sets"
-            let category: String = collection_handle
-                .split('-')
-                .filter(|w| !w.is_empty())
-                .map(|w| {
-                    let mut chars = w.chars();
-                    match chars.next() {
-                        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                        None => String::new(),
+            // "lipstick-sets" -> "Lipstick Sets". Mirrors upstream's
+            // `handle.replace("-", " ").title().strip()`: Python's title()
+            // uppercases a letter after any non-alphabetic character
+            // ("2in1" -> "2In1") and lowercases the rest.
+            let mut category = String::with_capacity(collection_handle.len());
+            let mut prev_alpha = false;
+            for ch in collection_handle.chars() {
+                if ch == '-' {
+                    category.push(' ');
+                    prev_alpha = false;
+                } else if ch.is_alphabetic() {
+                    if prev_alpha {
+                        category.extend(ch.to_lowercase());
+                    } else {
+                        category.extend(ch.to_uppercase());
                     }
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
+                    prev_alpha = true;
+                } else {
+                    category.push(ch);
+                    prev_alpha = false;
+                }
+            }
+            let category = category.trim().to_string();
 
-            // compare_at_price counts only when present and non-zero.
-            let old_price = variant["compare_at_price"]
-                .as_str()
-                .filter(|p| p.parse::<f64>().map(|v| v != 0.0).unwrap_or(false))
-                .unwrap_or("");
+            // compare_at_price counts only when present and non-zero;
+            // like all price-ish fields it passes through with its original
+            // JSON type (some stores serialize prices as numbers).
+            let cap = &variant["compare_at_price"];
+            let nonzero = match cap {
+                serde_json::Value::String(s) => s.parse::<f64>().map(|v| v != 0.0).unwrap_or(false),
+                serde_json::Value::Number(n) => n.as_f64().map(|v| v != 0.0).unwrap_or(false),
+                _ => false,
+            };
+            let old_price = if nonzero {
+                cap.clone()
+            } else {
+                serde_json::json!("")
+            };
 
             let description = product["body_html"]
                 .as_str()
@@ -198,11 +245,11 @@ impl ShopifySpider {
 
             items.push(serde_json::json!({
                 "name": name,
-                "price": variant["price"].as_str().unwrap_or_default(),
+                "price": raw_or_empty(&variant["price"]),
                 "category": category,
                 "brand": product["vendor"].as_str().unwrap_or_default(),
                 "identifier": variant["id"],
-                "sku": variant["sku"].as_str().unwrap_or_default(),
+                "sku": raw_or_empty(&variant["sku"]),
                 "stock": if variant["available"].as_bool().unwrap_or(false) {
                     serde_json::Value::Null
                 } else {
@@ -215,7 +262,7 @@ impl ShopifySpider {
                 ),
                 "description": description,
                 "old_price": old_price,
-                "barcode": variant["barcode"].as_str().unwrap_or_default(),
+                "barcode": raw_or_empty(&variant["barcode"]),
             }));
         }
     }
@@ -255,6 +302,11 @@ impl Spider for ShopifySpider {
         &self,
         response: SpiderResponse,
     ) -> (Vec<serde_json::Value>, Vec<SpiderRequest>) {
+        // Routing works off the *final* (post-redirect) URL. Host-only
+        // redirects (apex -> www, myshopify -> custom domain) are harmless;
+        // a redirect that rewrites the path shape (e.g. locale-prefixed
+        // /en-us/collections.json) is not recognized and that response is
+        // skipped — point the builder at the store's canonical domain.
         let Ok(url) = Url::parse(response.url()) else {
             return (Vec::new(), Vec::new());
         };
@@ -352,6 +404,35 @@ mod tests {
             "shop.example.com"
         );
         assert_eq!(ShopifySpider::host_of("example.com/"), "example.com");
+        // Explicit ports are preserved (Python netloc parity).
+        assert_eq!(
+            ShopifySpider::host_of("http://localhost:3000/store"),
+            "localhost:3000"
+        );
+    }
+
+    #[test]
+    fn handles_are_percent_decoded() {
+        let url = Url::parse(
+            "https://example.com/collections/%E3%83%AA%E3%83%83%E3%83%97/products.json?page=1",
+        )
+        .unwrap();
+        assert_eq!(
+            ShopifySpider::products_handle(&url).as_deref(),
+            Some("リップ")
+        );
+    }
+
+    #[test]
+    fn category_matches_python_title_semantics() {
+        let spider = ShopifySpider::builder("example.com").build();
+        let mut items = Vec::new();
+        let product = serde_json::json!({
+            "title": "Shampoo", "handle": "s", "vendor": "Acme", "body_html": null,
+            "images": [], "variants": [{"id": 99, "title": "Default Title", "price": "1.00", "available": true}],
+        });
+        spider.process_product(&product, "2in1-shampoo", &mut items);
+        assert_eq!(items[0]["category"], "2In1 Shampoo");
     }
 
     #[test]
