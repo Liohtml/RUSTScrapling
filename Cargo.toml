@@ -1,6 +1,6 @@
 [package]
 name = "rust_scrapling"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "A Rust port of Scrapling - modern web scraping framework with CSS selectors, async HTTP, and spider-based crawling"
 authors = ["Liohtml"]
@@ -14,9 +14,9 @@ readme = "README.md"
 # and the committed Cargo.lock is v4 (needs Cargo >= 1.78). Verified by the
 # `msrv` CI job; the previously declared 1.75 did not actually build.
 rust-version = "1.88"
-# Not yet released on crates.io (README documents a git dependency). Guard
-# against an accidental `cargo publish` reserving the name permanently.
-publish = false
+# Keep the published package lean: docs (multi-MB GIF/PNG assets, planning
+# notes), benchmark scripts, and CI config are repo-only.
+exclude = ["docs/", "scripts/", ".github/", ".claude/"]
 
 [dependencies]
 scraper = "0.22"

@@ -2,7 +2,7 @@
 
 # RUSTScrapling
 
-![RUSTScrapling — the crab that weaves the web](docs/assets/demo.gif)
+![RUSTScrapling — the crab that weaves the web](https://raw.githubusercontent.com/Liohtml/RUSTScrapling/master/docs/assets/demo.gif)
 
 **A high-performance Rust port of [Scrapling](https://github.com/D4Vinci/Scrapling) — the modern web scraping framework built by web scrapers, for web scrapers.**
 
@@ -68,10 +68,16 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rust_scrapling = { git = "https://github.com/Liohtml/RUSTScrapling" }
+rust_scrapling = "0.2"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"          # items are serde_json::Value
 async-trait = "0.1"       # only needed when implementing the Spider trait
+```
+
+Or track the latest development version straight from git:
+
+```toml
+rust_scrapling = { git = "https://github.com/Liohtml/RUSTScrapling" }
 ```
 
 **Requirements:** Rust 1.88+ (edition 2021)
@@ -538,6 +544,16 @@ let spider = CrawlSpider::builder("articles")
 ```
 
 **`SitemapSpider`** — seed a crawl from sitemaps (or robots.txt `Sitemap:` directives), recurse through sitemap indexes, and dispatch page URLs through rules — see the [Quick Start](#quick-start) for a complete example.
+
+**`ShopifySpider`** — extract every product variant from any Shopify-powered store through its JSON API (`collections.json` → per-collection `products.json`), no HTML parsing and no selectors to maintain:
+
+```rust
+use rust_scrapling::ShopifySpider;
+
+let spider = ShopifySpider::builder("shop.example.com").build();
+// items: { name, price, category, brand, identifier, sku, stock,
+//          image_url, url, description, old_price, barcode }
+```
 
 ---
 
