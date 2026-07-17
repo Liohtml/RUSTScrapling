@@ -1,0 +1,52 @@
+name: Cleanup branches
+
+# Manually triggered janitor: deletes every remote branch except the default
+# branch and heads of open pull requests. Exists because remote sessions'
+# credentials may not delete refs directly; the Actions token may.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Only list the branches that would be deleted"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+
+      - name: Delete stale branches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          git fetch --prune origin
+          default_branch="${{ github.event.repository.default_branch }}"
+          open_heads=$(gh pr list --state open --json headRefName --jq '.[].headRefName')
+
+          deleted=0
+          for branch in $(git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin); do
+            [ "$branch" = "$default_branch" ] && continue
+            [ "$branch" = "HEAD" ] && continue
+            if printf '%s\n' "$open_heads" | grep -qx "$branch"; then
+              echo "SKIP (open PR): $branch"
+              continue
+            fi
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "WOULD DELETE: $branch"
+            else
+              echo "DELETE: $branch"
+              git push origin --delete "$branch"
+            fi
+            deleted=$((deleted + 1))
+          done
+          echo "Processed $deleted branch(es)."
