@@ -1,0 +1,99 @@
+name: Release
+
+# Automatic releases: whenever the version in Cargo.toml changes on master
+# (i.e. a version-bump PR is merged), this workflow tags vX.Y.Z, creates a
+# GitHub release with the matching CHANGELOG section, and publishes the
+# crate to crates.io. Every step is idempotent — if the tag or the crates.io
+# version already exists, that step is skipped — so re-runs and
+# Cargo.toml edits without a version bump are safe no-ops.
+#
+# Requirements: the CARGO_REGISTRY_TOKEN repository secret must be set
+# (Settings -> Secrets and variables -> Actions) for the crates.io publish;
+# without it the tag + GitHub release still happen and publishing is skipped
+# with a notice.
+
+on:
+  push:
+    branches: [master]
+    paths: [Cargo.toml]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0 # full history so existing tags are visible
+
+      - name: Determine version and whether it is already released
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/v$version" > /dev/null; then
+            echo "Tag v$version already exists — nothing to release."
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract CHANGELOG section
+        if: steps.version.outputs.new == 'true'
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          awk -v ver="$version" '$0 ~ "^## \\[" ver "\\]" {flag=1; next} /^## \[/ {flag=0} flag' \
+            CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "No CHANGELOG section found for $version — using a generic note." >&2
+            echo "Release v$version. See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/master/CHANGELOG.md)." > release-notes.md
+          fi
+          {
+            echo ""
+            echo "---"
+            echo "Published on crates.io: https://crates.io/crates/rust_scrapling/$version"
+          } >> release-notes.md
+
+      - name: Create tag and GitHub release
+        if: steps.version.outputs.new == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          gh release create "v$version" \
+            --target "$GITHUB_SHA" \
+            --title "v$version" \
+            --notes-file release-notes.md
+
+      - name: Install Rust toolchain
+        if: steps.version.outputs.new == 'true'
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+
+      - name: Publish to crates.io
+        if: steps.version.outputs.new == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "::notice::CARGO_REGISTRY_TOKEN secret is not set — skipping crates.io publish."
+            exit 0
+          fi
+          # Idempotence: skip if this version is already on the registry.
+          if curl -fsS "https://index.crates.io/ru/st/rust_scrapling" 2>/dev/null \
+              | grep -q "\"vers\":\"$version\""; then
+            echo "rust_scrapling $version is already on crates.io — skipping publish."
+            exit 0
+          fi
+          cargo publish --locked
