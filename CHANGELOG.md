@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-07-17
+
+First release shipped through the automated release pipeline (tag,
+GitHub release, and crates.io publish are created by CI on version bump).
+
+### Added
+
+- `documentation` link (docs.rs) in the crate metadata, shown on the crates.io page
+
 ## [0.2.0] - 2026-07-17
 
 First release published to crates.io. Syncs all applicable changes from
@@ -52,5 +61,6 @@ upstream Scrapling v0.4.8 through v0.4.11.
 - **CLI**: `fetch` and `extract` subcommands with CSS selector and format options
 - **175 tests** covering all modules
 
+[0.2.1]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.1.0
