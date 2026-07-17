@@ -15,4 +15,4 @@ pub use spiders::links::LinkExtractor;
 pub use spiders::request::SpiderRequest;
 pub use spiders::result::{CrawlResult, CrawlStats, ItemList};
 pub use spiders::spider::Spider;
-pub use spiders::templates::{CrawlRule, CrawlSpider, SitemapSpider};
+pub use spiders::templates::{CrawlRule, CrawlSpider, ShopifySpider, SitemapSpider};
