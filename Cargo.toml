@@ -34,7 +34,7 @@ serde_json = "1"
 # therefore require a crate bump rather than an OS update — Dependabot (see
 # .github/dependabot.yml) surfaces those bumps as PRs, and `cargo audit` in CI
 # flags any known advisory in the meantime.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 regex = "1"
 encoding_rs = "0.8"
 sha2 = "0.10"
