@@ -312,3 +312,24 @@ fn test_find_all_by_text() {
     // Should find at least the 3 li elements (and potentially the ul that contains them)
     assert!(found.len() >= 3);
 }
+
+#[test]
+fn test_find_by_text_first_and_last_match_agree_on_nested_text() {
+    // Regression: find_by_text(first_match=true) used to match only an
+    // element's DIRECT text, while first_match=false (via find_all_by_text)
+    // matched the full RECURSIVE text — so the same query could find
+    // different elements depending on the flag. Both must use the same
+    // (recursive) text source.
+    let html = r#"<html><body><div id="outer"><span id="inner">hello</span></div></body></html>"#;
+    let sel = Selector::from_html(html);
+
+    let first = sel
+        .find_by_text("hello", true, false, true)
+        .expect("first_match=true must find the span (or an ancestor) via recursive text");
+    assert_eq!(first.tag(), "span");
+
+    let last = sel
+        .find_by_text("hello", false, false, true)
+        .expect("first_match=false must find a match too");
+    assert_eq!(last.tag(), "span");
+}

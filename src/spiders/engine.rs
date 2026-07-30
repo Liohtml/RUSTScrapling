@@ -157,10 +157,22 @@ impl<S: Spider> CrawlerEngine<S> {
                     // that are not (originally enqueued with dont_filter,
                     // e.g. blocked retries) must be re-crawled anyway.
                     sched.restore_seen(data.seen_fingerprints);
-                    for url in &data.pending_urls {
-                        let mut req = SpiderRequest::new(url);
-                        req.set_dont_filter(true);
-                        sched.enqueue(req);
+                    if !data.pending_requests.is_empty() {
+                        // Full requests (method, headers, body, meta,
+                        // priority) survived the checkpoint — restore them
+                        // as-is rather than degrading to bare GETs.
+                        for mut req in data.pending_requests {
+                            req.set_dont_filter(true);
+                            sched.enqueue(req);
+                        }
+                    } else {
+                        // Checkpoint written before `pending_requests`
+                        // existed: only bare URLs are available.
+                        for url in &data.pending_urls {
+                            let mut req = SpiderRequest::new(url);
+                            req.set_dont_filter(true);
+                            sched.enqueue(req);
+                        }
                     }
                     true
                 } else {
@@ -298,13 +310,14 @@ impl<S: Spider> CrawlerEngine<S> {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
             if let Some(ref cp) = self.checkpoint {
-                let (pending_urls, seen_fingerprints) = {
+                let (pending_requests, seen_fingerprints) = {
                     let sched = self.scheduler.lock().await;
                     sched.snapshot()
                 };
                 let items_count = self.items.lock().await.len() as u64;
                 let data = CheckpointData {
-                    pending_urls,
+                    pending_requests,
+                    pending_urls: Vec::new(),
                     seen_fingerprints,
                     items_count,
                 };

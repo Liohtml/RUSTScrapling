@@ -59,11 +59,59 @@ impl SessionManager {
             .get(session_id)
             .ok_or_else(|| SessionError::NotFound(session_id.to_string()))?;
 
+        // Per-request headers (set via `SpiderRequestBuilder::header`) are
+        // layered on top of the session's config-built headers.
+        let extra_headers = if request.headers().is_empty() {
+            None
+        } else {
+            Some(request.headers())
+        };
+
         let result = match request.method() {
-            "GET" => fetcher.get(request.url()).await,
-            "POST" => fetcher.post(request.url(), request.body(), None).await,
-            "PUT" => fetcher.put(request.url(), request.body(), None).await,
-            "DELETE" => fetcher.delete(request.url()).await,
+            "GET" => {
+                fetcher
+                    .request(
+                        reqwest::Method::GET,
+                        request.url(),
+                        None,
+                        None,
+                        extra_headers,
+                    )
+                    .await
+            }
+            "POST" => {
+                fetcher
+                    .request(
+                        reqwest::Method::POST,
+                        request.url(),
+                        request.body(),
+                        None,
+                        extra_headers,
+                    )
+                    .await
+            }
+            "PUT" => {
+                fetcher
+                    .request(
+                        reqwest::Method::PUT,
+                        request.url(),
+                        request.body(),
+                        None,
+                        extra_headers,
+                    )
+                    .await
+            }
+            "DELETE" => {
+                fetcher
+                    .request(
+                        reqwest::Method::DELETE,
+                        request.url(),
+                        None,
+                        None,
+                        extra_headers,
+                    )
+                    .await
+            }
             m => return Err(SessionError::UnsupportedMethod(m.to_string())),
         };
         result.map_err(|e| SessionError::Network(e.to_string()))

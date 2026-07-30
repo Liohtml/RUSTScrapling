@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
@@ -81,9 +81,12 @@ impl SqliteStorage {
         let conn = self.locked_conn();
         let mut stmt =
             conn.prepare("SELECT element_data FROM storage WHERE url = ?1 AND identifier = ?2")?;
+        // `.optional()` maps only `QueryReturnedNoRows` to `None`; any other
+        // error (locked file, corrupt DB, type mismatch) still propagates
+        // instead of being indistinguishable from "not saved yet".
         let result: Option<String> = stmt
             .query_row(params![self.url, hash], |row| row.get(0))
-            .ok();
+            .optional()?;
         match result {
             Some(json) => {
                 let data = serde_json::from_str(&json)?;
@@ -148,6 +151,29 @@ mod tests {
         assert_eq!(
             got.get("k").cloned(),
             Some(serde_json::Value::String("v".to_string()))
+        );
+    }
+
+    #[test]
+    fn retrieve_propagates_real_sqlite_errors_instead_of_swallowing_them() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("storage.db");
+        let storage = SqliteStorage::new(db.to_str().unwrap(), "https://example.com").unwrap();
+
+        // Drop the table out from under the connection so the next SELECT
+        // fails with a real SQLite error (not "no rows"). Before switching to
+        // `.optional()`, `retrieve` used `.ok()`, which mapped ANY error —
+        // including this one — to `Ok(None)`, indistinguishable from "not
+        // saved yet".
+        {
+            let conn = storage.conn.lock().unwrap();
+            conn.execute("DROP TABLE storage", []).unwrap();
+        }
+
+        let result = storage.retrieve("whatever");
+        assert!(
+            result.is_err(),
+            "a genuine SQLite error must propagate, not be swallowed as None"
         );
     }
 }

@@ -78,6 +78,38 @@ fn test_ordering() {
 }
 
 #[test]
+fn test_ord_consistent_with_partial_eq_for_same_priority_different_fingerprint() {
+    // Ord's contract requires a == b iff a.cmp(b) == Equal. Two requests with
+    // the same priority but different URLs (hence different fingerprints)
+    // are not PartialEq-equal, so cmp must not report them Equal either —
+    // it previously compared only priority, breaking the contract.
+    use std::cmp::Ordering;
+    let a = SpiderRequest::builder("https://example.com/a")
+        .priority(1)
+        .build();
+    let b = SpiderRequest::builder("https://example.com/b")
+        .priority(1)
+        .build();
+    assert_ne!(a, b);
+    assert_ne!(a.cmp(&b), Ordering::Equal);
+    // Priority still dominates the comparison.
+    assert_eq!(a.cmp(&b), a.fingerprint().cmp(b.fingerprint()));
+}
+
+#[test]
+fn test_ord_equal_only_for_equal_requests() {
+    use std::cmp::Ordering;
+    let a = SpiderRequest::builder("https://example.com/same")
+        .priority(3)
+        .build();
+    let b = SpiderRequest::builder("https://example.com/same")
+        .priority(3)
+        .build();
+    assert_eq!(a, b);
+    assert_eq!(a.cmp(&b), Ordering::Equal);
+}
+
+#[test]
 fn test_meta() {
     let mut req = SpiderRequest::new("https://example.com");
     assert!(req.meta("key").is_none());
