@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use url::Url;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SpiderRequest {
     url: String,
     method: String,
@@ -187,7 +187,12 @@ impl PartialOrd for SpiderRequest {
 
 impl Ord for SpiderRequest {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.priority.cmp(&other.priority)
+        // Tie-break on fingerprint so `cmp` stays consistent with `PartialEq`
+        // (required by the `Ord` contract: a == b iff a.cmp(b) == Equal) and
+        // so same-priority requests get a deterministic, not arbitrary, order.
+        self.priority
+            .cmp(&other.priority)
+            .then_with(|| self.fingerprint.cmp(&other.fingerprint))
     }
 }
 

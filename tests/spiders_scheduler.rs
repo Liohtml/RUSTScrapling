@@ -128,8 +128,7 @@ fn test_restored_pending_reenqueues_with_dont_filter() {
 
     let mut resumed = Scheduler::new(false, false, false);
     resumed.restore_seen(seen);
-    for url in &pending {
-        let mut req = SpiderRequest::new(url);
+    for mut req in pending {
         req.set_dont_filter(true);
         assert!(resumed.enqueue(req));
     }

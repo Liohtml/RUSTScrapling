@@ -184,7 +184,8 @@ async fn resume_restores_seen_set_and_skips_already_crawled_urls() {
     let follow_fp = SpiderRequest::new(&follow).fingerprint().to_string();
     let mgr = CheckpointManager::new(&format!("{}/checkpoints", base)).unwrap();
     mgr.save(&CheckpointData {
-        pending_urls: vec![start.clone()],
+        pending_requests: vec![SpiderRequest::new(&start)],
+        pending_urls: vec![],
         seen_fingerprints: vec![follow_fp],
         items_count: 0,
     })
@@ -241,7 +242,7 @@ async fn checkpoint_saved_on_pause_includes_seen_fingerprints() {
 
     let mgr = CheckpointManager::new(&format!("{}/checkpoints", base)).unwrap();
     let data = mgr.restore().await.expect("checkpoint written on pause");
-    assert_eq!(data.pending_urls.len(), urls.len());
+    assert_eq!(data.pending_requests.len(), urls.len());
     assert_eq!(
         data.seen_fingerprints.len(),
         urls.len(),

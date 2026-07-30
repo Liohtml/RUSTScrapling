@@ -1,3 +1,4 @@
+use super::request::SpiderRequest;
 use std::io::Write;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
@@ -8,6 +9,15 @@ pub struct CheckpointManager {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct CheckpointData {
+    /// Full pending requests — method, headers, body, meta, priority and all
+    /// — as of the pause. This is what current versions write.
+    #[serde(default)]
+    pub pending_requests: Vec<SpiderRequest>,
+    /// Bare pending URLs. Kept only so a checkpoint written by an older
+    /// version (pre-`pending_requests`) still restores instead of resuming
+    /// with an empty queue; current versions leave this empty and use
+    /// `pending_requests` instead.
+    #[serde(default)]
     pub pending_urls: Vec<String>,
     pub seen_fingerprints: Vec<String>,
     pub items_count: u64,
@@ -68,7 +78,8 @@ mod tests {
 
     fn sample(items: u64) -> CheckpointData {
         CheckpointData {
-            pending_urls: vec!["https://example.com".into()],
+            pending_requests: vec![SpiderRequest::new("https://example.com")],
+            pending_urls: vec![],
             seen_fingerprints: vec![],
             items_count: items,
         }
@@ -83,10 +94,25 @@ mod tests {
         assert!(mgr.exists());
         let restored = mgr.restore().await.unwrap();
         assert_eq!(restored.items_count, 42);
-        assert_eq!(
-            restored.pending_urls,
-            vec!["https://example.com".to_string()]
-        );
+        assert_eq!(restored.pending_requests.len(), 1);
+        assert_eq!(restored.pending_requests[0].url(), "https://example.com");
+    }
+
+    #[tokio::test]
+    async fn restore_falls_back_to_pending_urls_for_pre_upgrade_checkpoints() {
+        // Simulates a checkpoint written before `pending_requests` existed:
+        // only the `pending_urls`/`seen_fingerprints`/`items_count` fields
+        // are present in the JSON. `#[serde(default)]` must still let this
+        // deserialize, with `pending_requests` coming back empty.
+        let dir = tempdir().unwrap();
+        let mgr = CheckpointManager::new(dir.path().to_str().unwrap()).unwrap();
+        let legacy_json = r#"{"pending_urls":["https://example.com/old"],"seen_fingerprints":[],"items_count":5}"#;
+        std::fs::write(dir.path().join("checkpoint.json"), legacy_json).unwrap();
+
+        let restored = mgr.restore().await.expect("legacy checkpoint must parse");
+        assert_eq!(restored.items_count, 5);
+        assert!(restored.pending_requests.is_empty());
+        assert_eq!(restored.pending_urls, vec!["https://example.com/old"]);
     }
 
     #[tokio::test]

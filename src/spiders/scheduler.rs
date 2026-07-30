@@ -79,10 +79,11 @@ impl Scheduler {
         self.queue.iter().collect()
     }
 
-    /// Snapshot the scheduler state for checkpointing: the URLs of all
-    /// pending requests plus a copy of the seen fingerprint set.
-    pub fn snapshot(&self) -> (Vec<String>, Vec<String>) {
-        let pending = self.queue.iter().map(|r| r.url().to_string()).collect();
+    /// Snapshot the scheduler state for checkpointing: a full copy of all
+    /// pending requests (method, headers, body, meta, priority — everything,
+    /// not just the URL) plus a copy of the seen fingerprint set.
+    pub fn snapshot(&self) -> (Vec<SpiderRequest>, Vec<String>) {
+        let pending = self.queue.iter().cloned().collect();
         let seen = self.seen.iter().cloned().collect();
         (pending, seen)
     }

@@ -165,11 +165,13 @@ impl From<&str> for TextHandler {
 }
 
 fn decode_html_entities(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&lt;", "<")
+    // `&amp;` must decode LAST: decoding it first would turn a literal
+    // `&amp;lt;` (which should read as the text `&lt;`) into `<`.
+    s.replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
         .replace("&apos;", "'")
         .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
 }

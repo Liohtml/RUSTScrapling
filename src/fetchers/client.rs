@@ -128,7 +128,8 @@ impl Fetcher {
     }
 
     pub async fn get(&self, url: &str) -> Result<Response, FetcherError> {
-        self.request(reqwest::Method::GET, url, None, None).await
+        self.request(reqwest::Method::GET, url, None, None, None)
+            .await
     }
 
     pub async fn post(
@@ -137,7 +138,8 @@ impl Fetcher {
         body: Option<&str>,
         json: Option<&serde_json::Value>,
     ) -> Result<Response, FetcherError> {
-        self.request(reqwest::Method::POST, url, body, json).await
+        self.request(reqwest::Method::POST, url, body, json, None)
+            .await
     }
 
     pub async fn put(
@@ -146,22 +148,34 @@ impl Fetcher {
         body: Option<&str>,
         json: Option<&serde_json::Value>,
     ) -> Result<Response, FetcherError> {
-        self.request(reqwest::Method::PUT, url, body, json).await
+        self.request(reqwest::Method::PUT, url, body, json, None)
+            .await
     }
 
     pub async fn delete(&self, url: &str) -> Result<Response, FetcherError> {
-        self.request(reqwest::Method::DELETE, url, None, None).await
+        self.request(reqwest::Method::DELETE, url, None, None, None)
+            .await
     }
 
-    /// Internal request method with retry loop.
-    async fn request(
+    /// Internal request method with retry loop. `extra_headers`, when set,
+    /// are applied on top of the config-built headers (e.g. per-request
+    /// headers from a [`crate::spiders::request::SpiderRequest`]) — used by
+    /// [`crate::spiders::session::SessionManager`] so per-request headers set
+    /// via `SpiderRequestBuilder::header` actually reach the wire.
+    pub(crate) async fn request(
         &self,
         method: reqwest::Method,
         url: &str,
         body: Option<&str>,
         json: Option<&serde_json::Value>,
+        extra_headers: Option<&HashMap<String, String>>,
     ) -> Result<Response, FetcherError> {
-        let headers = self.config.build_headers(url, self.config.stealthy_headers);
+        let mut headers = self.config.build_headers(url, self.config.stealthy_headers);
+        if let Some(extra) = extra_headers {
+            for (k, v) in extra {
+                headers.insert(k.clone(), v.clone());
+            }
+        }
 
         let mut last_error = String::new();
 

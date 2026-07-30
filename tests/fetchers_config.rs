@@ -191,6 +191,24 @@ fn proxy_rotator_random_stays_in_bounds() {
 }
 
 #[test]
+fn proxy_rotator_random_advances_cursor() {
+    // Regression: random() used to only load the cursor, never advance it,
+    // so consecutive calls kept returning the same proxy until something
+    // else called next().
+    let proxies: Vec<String> = (0..5)
+        .map(|i| format!("http://proxy{}.example.com", i))
+        .collect();
+    let rotator = ProxyRotator::new(proxies).expect("should create rotator");
+
+    let picks: Vec<&str> = (0..10).map(|_| rotator.random()).collect();
+    assert!(
+        picks.windows(2).any(|w| w[0] != w[1]),
+        "random() must eventually pick a different proxy across calls: {:?}",
+        picks
+    );
+}
+
+#[test]
 fn proxy_rotator_len() {
     let proxies = vec![
         "http://a.example.com".to_string(),

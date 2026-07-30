@@ -38,9 +38,10 @@ impl ProxyRotator {
         self.cursor.fetch_add(1, Ordering::Relaxed) % self.proxies.len()
     }
 
-    /// Return a pseudo-random proxy based on the current cursor position.
+    /// Return a pseudo-random proxy, advancing the cursor so consecutive
+    /// calls don't keep returning the same proxy.
     pub fn random(&self) -> &str {
-        let pos = self.cursor.load(Ordering::Relaxed);
+        let pos = self.cursor.fetch_add(1, Ordering::Relaxed);
         // Simple pseudo-random selection: mix the position with a constant.
         let idx = pos.wrapping_mul(2654435761).wrapping_add(1013904223) % self.proxies.len();
         &self.proxies[idx]

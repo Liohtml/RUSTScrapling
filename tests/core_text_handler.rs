@@ -119,6 +119,16 @@ fn test_clean_without_entities() {
     assert_eq!(cleaned.as_str(), "Hello &amp; World");
 }
 
+#[test]
+fn test_clean_does_not_double_decode_escaped_ampersand() {
+    // A literal "&lt;" in the source, escaped as "&amp;lt;", must decode to
+    // the text "&lt;" — not further to "<". Decoding &amp; before the other
+    // entities would cause exactly that double-decode.
+    let t = TextHandler::new("&amp;lt;script&amp;gt;");
+    let cleaned = t.clean(true);
+    assert_eq!(cleaned.as_str(), "&lt;script&gt;");
+}
+
 // ── JSON ──
 
 #[test]

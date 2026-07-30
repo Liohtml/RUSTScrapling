@@ -364,19 +364,25 @@ impl Selector {
     ) -> Option<Selector> {
         for child in node.children() {
             if child.value().is_element() {
-                // Get the direct text of this element
-                let child_sel = self.child_selector(child.id());
-                let el_text = child_sel.text();
-                let el_str = el_text.as_str();
-
-                if text_matches(el_str, text, partial, case_sensitive) {
-                    return Some(child_sel);
-                }
-
-                // Recurse
+                // Descend first so the most specific (deepest) matching
+                // element wins, and only test this element's own full
+                // recursive text if none of its descendants matched. Using
+                // the same recursive text source as `find_all_text_recursive`
+                // (rather than direct-children-only text) keeps
+                // `first_match=true` and `first_match=false` in agreement on
+                // which elements match; checking children first keeps a
+                // container whose aggregate text happens to contain the
+                // query from shadowing a more specific descendant (e.g. the
+                // document root's text contains nearly everything).
                 if let Some(found) = self.find_text_recursive(child, text, partial, case_sensitive)
                 {
                     return Some(found);
+                }
+
+                let child_sel = self.child_selector(child.id());
+                let el_text = child_sel.get_all_text("", true, &[], None);
+                if text_matches(el_text.as_str(), text, partial, case_sensitive) {
+                    return Some(child_sel);
                 }
             }
         }

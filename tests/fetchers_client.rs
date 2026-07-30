@@ -141,6 +141,65 @@ fn test_fetcher_builds_with_custom_config() {
     assert!(Fetcher::new(config).is_ok());
 }
 
+#[tokio::test]
+async fn session_manager_forwards_request_level_headers() {
+    // Regression test: SpiderRequestBuilder::header() must actually reach the
+    // wire. SessionManager::fetch used to call Fetcher::get/post/put/delete
+    // without the request's headers, silently dropping them. A local TCP
+    // listener stands in for a real server so this runs in CI without
+    // network access.
+    use rust_scrapling::spiders::request::SpiderRequest;
+    use rust_scrapling::spiders::session::SessionManager;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut received = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = socket.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            received.extend_from_slice(&buf[..n]);
+            if received.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let body = "ok";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+        socket.shutdown().await.unwrap();
+        String::from_utf8_lossy(&received).to_string()
+    });
+
+    let mut manager = SessionManager::new(FetcherConfig::default());
+    manager.ensure_default().unwrap();
+
+    let request = SpiderRequest::builder(&format!("http://{}/", addr))
+        .header("x-scrapling-test", "flows-through")
+        .build();
+
+    let response = manager.fetch(&request).await.expect("request succeeds");
+    assert_eq!(response.status(), 200);
+
+    let request_text = server.await.unwrap();
+    assert!(
+        request_text
+            .to_lowercase()
+            .contains("x-scrapling-test: flows-through"),
+        "custom per-request header must reach the wire, got request:\n{request_text}"
+    );
+}
+
 // Network tests (these hit httpbin.org - marked with #[ignore] so they don't run by default)
 #[tokio::test]
 #[ignore]
