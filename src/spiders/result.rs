@@ -53,6 +53,11 @@ impl ItemList {
     /// for keys it doesn't have. Nested values (objects/arrays) are
     /// serialized as JSON strings; null becomes an empty cell. Items that
     /// are not JSON objects are skipped.
+    ///
+    /// Values are exported verbatim (RFC 4180 only). If the file will be
+    /// opened in a spreadsheet application, be aware that scraped cell
+    /// values starting with `=`, `+`, `-`, or `@` may be interpreted as
+    /// formulas there — sanitize downstream if that matters for your use.
     pub fn to_csv(&self, path: &Path) -> io::Result<()> {
         let columns = self.union_of_keys();
         let mut out = String::new();
@@ -156,11 +161,25 @@ fn csv_escape(field: &str) -> String {
 }
 
 fn xml_escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+    // XML 1.0 forbids most C0 control characters (and U+FFFE/U+FFFF) even
+    // as character references — scraped content routinely contains them,
+    // and a single stray byte would make the whole export unparseable.
+    // Drop them; escape the five markup characters.
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            '\t' | '\n' | '\r' => out.push(c),
+            '\u{FFFE}' | '\u{FFFF}' => {}
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Sanitize an arbitrary JSON key into a valid XML element name: characters
@@ -369,6 +388,36 @@ mod tests {
         assert!(content.contains("<_1st>leading digit</_1st>"));
         assert!(content.contains("<_>empty key</_>"));
         assert!(content.trim_end().ends_with("</items>"));
+    }
+
+    #[test]
+    fn xml_strips_invalid_control_characters() {
+        // XML 1.0 forbids most C0 controls even as entities; a single stray
+        // byte from scraped content must not make the export unparseable.
+        let mut items = ItemList::new();
+        items.push(json!({
+            "text": "bell\u{0007} null\u{0000} keep\ttab\nnewline \u{FFFF}end",
+        }));
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("items.xml");
+        items.to_xml(&path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("<text>bell null keep\ttab\nnewline end</text>"));
+        assert!(!content.contains('\u{0007}'));
+        assert!(!content.contains('\u{FFFF}'));
+    }
+
+    #[test]
+    fn csv_rows_end_with_crlf() {
+        // RFC 4180 rows terminate with CRLF; assert at the byte level since
+        // lines() would silently strip the \r.
+        let mut items = ItemList::new();
+        items.push(json!({"k": "v"}));
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("crlf.csv");
+        items.to_csv(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes, b"k\r\nv\r\n");
     }
 
     #[test]
