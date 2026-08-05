@@ -314,6 +314,65 @@ fn test_find_all_by_text() {
 }
 
 #[test]
+fn test_css_getall_text_pseudo_element() {
+    let sel = Selector::from_html(HTML);
+    let texts: Vec<String> = sel
+        .css_getall("li.item::text")
+        .into_iter()
+        .map(|t| t.as_str().to_string())
+        .collect();
+    assert_eq!(texts, vec!["Item 1", "Item 2", "Item 3"]);
+}
+
+#[test]
+fn test_css_getall_attr_pseudo_element() {
+    let sel = Selector::from_html(HTML);
+    let prices: Vec<String> = sel
+        .css_getall("li.item::attr(data-price)")
+        .into_iter()
+        .map(|t| t.as_str().to_string())
+        .collect();
+    assert_eq!(prices, vec!["19.99", "29.99", "39.99"]);
+    // Elements without the attribute are skipped, not empty.
+    assert!(sel.css_getall("h1::attr(data-missing)").is_empty());
+}
+
+#[test]
+fn test_css_get_returns_first_value() {
+    let sel = Selector::from_html(HTML);
+    assert_eq!(
+        sel.css_get("li.item::text").map(|t| t.as_str().to_string()),
+        Some("Item 1".to_string())
+    );
+    assert_eq!(
+        sel.css_get("a.nav-link::attr(href)")
+            .map(|t| t.as_str().to_string()),
+        Some("/next".to_string())
+    );
+    assert!(sel.css_get(".does-not-exist::text").is_none());
+}
+
+#[test]
+fn test_css_get_plain_selector_yields_outer_html() {
+    let sel = Selector::from_html(HTML);
+    let html = sel.css_get("h1.title").unwrap();
+    assert!(html.as_str().contains("<h1"));
+    assert!(html.as_str().contains("Hello World"));
+}
+
+#[test]
+fn test_css_getall_recursive_text() {
+    // ::text extracts the full recursive text of each match.
+    let sel = Selector::from_html(HTML);
+    let texts: Vec<String> = sel
+        .css_getall("p.description::text")
+        .into_iter()
+        .map(|t| t.as_str().to_string())
+        .collect();
+    assert_eq!(texts, vec!["This is a test page."]);
+}
+
+#[test]
 fn test_find_by_text_first_and_last_match_agree_on_nested_text() {
     // Regression: find_by_text(first_match=true) used to match only an
     // element's DIRECT text, while first_match=false (via find_all_by_text)
@@ -332,4 +391,23 @@ fn test_find_by_text_first_and_last_match_agree_on_nested_text() {
         .find_by_text("hello", false, false, true)
         .expect("first_match=false must find a match too");
     assert_eq!(last.tag(), "span");
+}
+
+#[test]
+fn test_css_text_skips_text_less_elements() {
+    // Parity with Parsel and symmetry with ::attr: an element with no text
+    // nodes yields nothing, so css_get returns the first element that has
+    // actual text instead of Some("").
+    let html = r#"<html><body><ul><li></li><li>real</li></ul></body></html>"#;
+    let sel = Selector::from_html(html);
+    let texts: Vec<String> = sel
+        .css_getall("li::text")
+        .into_iter()
+        .map(|t| t.as_str().to_string())
+        .collect();
+    assert_eq!(texts, vec!["real"]);
+    assert_eq!(
+        sel.css_get("li::text").map(|t| t.as_str().to_string()),
+        Some("real".to_string())
+    );
 }

@@ -218,6 +218,55 @@ impl Selector {
         Selectors::new(items)
     }
 
+    /// Parsel-inspired CSS query with `::text` and `::attr(name)`
+    /// pseudo-element support, returning all extracted values:
+    ///
+    /// - `"li::text"` — the full recursive text of each matching element
+    ///   (including `<script>`/`<style>` content, like Parsel), joined
+    ///   without stripping so word spacing inside markup survives, then
+    ///   end-trimmed. Elements with no text yield nothing. Note this
+    ///   diverges from Parsel, which returns one string **per text node**
+    ///   and distinguishes `p::text` (direct children) from `p ::text`
+    ///   (descendants) — here `::text` is always one joined string per
+    ///   matched element, fully recursive.
+    /// - `"a::attr(href)"` — the attribute value of each matching element
+    ///   that has the attribute (elements without it are skipped, matching
+    ///   Parsel),
+    /// - a plain selector — each match's outer HTML.
+    pub fn css_getall(&self, query: &str) -> Vec<TextHandler> {
+        let q = crate::parser::translator::parse_css_query(query);
+        self.css(&q.selector)
+            .into_iter()
+            .filter_map(|el| {
+                if q.extract_text {
+                    // Join text nodes without stripping (so word spacing
+                    // inside markup like "a <b>bold</b> word" survives),
+                    // then trim the ends. Text-less elements yield None so
+                    // css_get skips to the first element with actual text,
+                    // symmetric with the ::attr path.
+                    let text = el.get_all_text("", false, &[], None);
+                    let trimmed = text.as_str().trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(TextHandler::from(trimmed))
+                    }
+                } else if let Some(ref attr) = q.extract_attr {
+                    el.get_attribute(attr)
+                } else {
+                    Some(el.outer_html())
+                }
+            })
+            .collect()
+    }
+
+    /// Like [`Self::css_getall`], but returns only the first extracted
+    /// value (Parsel's `.get()`): for `::attr`/`::text` queries this is the
+    /// first element that actually has a value, not merely the first match.
+    pub fn css_get(&self, query: &str) -> Option<TextHandler> {
+        self.css_getall(query).into_iter().next()
+    }
+
     /// Return direct element children.
     pub fn children(&self) -> Selectors {
         let node = self.node_ref();
