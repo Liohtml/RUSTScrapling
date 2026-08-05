@@ -5,6 +5,80 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-08-05
+
+Upstream v0.4.12 sync (AutoThrottle, CSV/XML export) plus the results of
+a full internal audit: seven silent-corruption bug fixes, engine
+concurrency fixes, complete robots.txt matching, `::text`/`::attr()`
+support, and a complete rustdoc pass.
+
+### Added
+
+- **AutoThrottle** (upstream v0.4.12): adaptive per-domain crawl delays
+  driven by measured response latency — 429/503 double the delay or
+  honor `Retry-After`, healthy responses ease it back down;
+  `download_delay` and robots.txt `Crawl-delay` are floors. Opt-in via
+  `Spider::autothrottle_enabled()`; spacing uses a per-domain
+  reservation clock so domains never delay each other
+- **CSV and XML export** (upstream v0.4.12): `ItemList::to_csv` (RFC
+  4180, header = union of keys across heterogeneous items, nested
+  values as JSON strings) and `ItemList::to_xml` (entity-escaped,
+  XML-invalid control characters stripped, element names sanitized)
+- **`::text` and `::attr(name)` pseudo-elements**: Parsel-inspired
+  `css_get`/`css_getall` on `Selector` and `SpiderResponse`
+- **Complete robots.txt matching**: `Allow:` directives with
+  longest-match-wins evaluation (Allow wins ties), `*`/`$` wildcards
+  matched against path + query, rules scoped per scheme + authority
+  (RFC 9309), combined same-agent groups, user-agent product-token
+  matching, robots.txt fetched from the request's actual origin
+  (scheme/host/port) instead of hardcoded `https://host/`
+- Per-domain (`domains_response_bytes`) and per-session
+  (`sessions_requests_count`) crawl statistics are now populated
+- Complete rustdoc documentation: crate overview with examples, every
+  public item documented (`missing_docs` enforced), `#[must_use]` on
+  builders and query methods
+
+### Changed
+
+- **Engine concurrency**: the per-domain semaphore is acquired inside
+  the spawned task instead of the dispatch loop, so one saturated
+  domain no longer stalls dispatch for every other domain; the
+  robots.txt network fetch no longer holds the manager lock (up to 10s)
+  while other tasks wait to check `is_allowed`; dev-cache replays skip
+  the download delay entirely
+- `serde_json` now uses `preserve_order`: item keys keep insertion
+  order (Python dict parity), so exports show fields in the order
+  spiders build them. Note for consumers: Cargo feature unification
+  enables insertion-ordered `serde_json::Map` crate-wide; and
+  fingerprints of requests whose `meta` contains nested objects can
+  differ from ones persisted by 0.2.1 (a resumed old checkpoint may
+  re-fetch such URLs once)
+- `tokio` dependency trimmed from `full` to the features actually used;
+  `once_cell` replaced by `std::sync::LazyLock`; unused `http` and
+  `tokio-test` dependencies removed
+
+### Fixed
+
+- **Per-request headers were never sent**: headers set via
+  `SpiderRequestBuilder::header()` now reach the wire
+- **Checkpoints preserved only URLs**: pending requests now persist in
+  full (method, headers, body, meta, priority); old URL-only
+  checkpoints still restore
+- **Blocked responses were cached in dev mode**, so retries replayed
+  the same blocked page from disk forever; the `is_blocked` check now
+  runs before the cache write
+- HTML entity decoding no longer double-decodes escaped entities
+  (`&amp;lt;` now correctly yields the literal text `&lt;`)
+- `find_by_text` matched different text depending on `first_match`;
+  both paths now use recursive text with deepest-match-first descent
+- `SpiderRequest`'s `Ord`/`PartialEq` contract violation fixed (tie
+  break on fingerprint)
+- `SqliteStorage::retrieve` no longer swallows real database errors as
+  "not found"
+- `ProxyRotator::random()` now advances its cursor
+- Hostile robots.txt `Crawl-delay` values (`inf`, `NaN`, huge numbers)
+  can no longer panic request tasks
+
 ## [0.2.1] - 2026-07-17
 
 First release shipped through the automated release pipeline (tag,
@@ -61,6 +135,7 @@ upstream Scrapling v0.4.8 through v0.4.11.
 - **CLI**: `fetch` and `extract` subcommands with CSS selector and format options
 - **175 tests** covering all modules
 
+[0.2.2]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.2.2
 [0.2.1]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.1.0
