@@ -1,29 +1,47 @@
+//! The development-mode response cache: responses are stored as JSON files
+//! (one per URL, named by the URL's SHA-256) and replayed on later runs so
+//! spider code can be iterated on without re-hitting the site. Enabled via
+//! [`Spider::development_mode`](crate::spiders::spider::Spider::development_mode).
+
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
 
+/// On-disk cache of fetched responses, keyed by URL.
 pub struct ResponseCache {
     cache_dir: PathBuf,
 }
 
+/// The serialized form of a cached response — enough to reconstruct a
+/// [`Response`](crate::fetchers::response::Response) exactly as it was
+/// fetched.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CachedResponse {
+    /// The HTTP status code.
     pub status: u16,
+    /// The raw `Content-Type` header value.
     pub content_type: String,
+    /// The decoded response body.
     pub body: String,
+    /// The final (post-redirect) URL.
     pub url: String,
+    /// The response headers.
     pub headers: HashMap<String, String>,
 }
 
 impl ResponseCache {
+    /// Open a cache rooted at `cache_dir`, creating the directory if
+    /// needed.
     pub fn new(cache_dir: &str) -> Result<Self, std::io::Error> {
         let path = PathBuf::from(cache_dir);
         std::fs::create_dir_all(&path)?;
         Ok(Self { cache_dir: path })
     }
 
+    /// Read the cached response for `url`, or `None` when there is no
+    /// entry or the entry cannot be read/parsed.
     pub async fn get(&self, url: &str) -> Option<CachedResponse> {
         let file_path = self.cache_path(url);
         // Async read so the Tokio worker thread is not blocked on disk I/O.
@@ -39,6 +57,7 @@ impl ResponseCache {
         tokio::fs::metadata(self.cache_path(url)).await.is_ok()
     }
 
+    /// Store (or atomically replace) the cached response for `url`.
     pub async fn put(&self, url: &str, response: &CachedResponse) -> Result<(), std::io::Error> {
         let file_path = self.cache_path(url);
         let cache_dir = self.cache_dir.clone();

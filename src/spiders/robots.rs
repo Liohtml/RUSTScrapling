@@ -1,7 +1,20 @@
+//! robots.txt compliance: fetching, RFC 9309 parsing (multi-agent groups,
+//! wildcard patterns, longest-match-wins with Allow winning ties), and
+//! `Crawl-delay` extraction. Enabled per spider via
+//! [`Spider::robots_txt_obey`](crate::spiders::spider::Spider::robots_txt_obey).
+
 use std::collections::HashMap;
 use std::time::Duration;
 use url::Url;
 
+/// Fetches, parses, and caches robots.txt rules per origin, and answers
+/// whether a URL may be crawled.
+///
+/// Rules are cached per scheme+authority origin (RFC 9309 scoping). When
+/// the manager lives behind a lock, use the [`RobotsTxtManager::fetch_rules`]
+/// / [`RobotsTxtManager::insert_rules`] split so the network round-trip
+/// runs without holding the lock; otherwise
+/// [`RobotsTxtManager::fetch_robots`] does both in one call.
 pub struct RobotsTxtManager {
     cache: HashMap<String, RobotsRules>,
     user_agent: String,
@@ -32,6 +45,9 @@ struct RobotsGroup {
 pub struct FetchedRobots(RobotsRules);
 
 impl RobotsTxtManager {
+    /// Create an empty manager. `user_agent` is the identity robots.txt
+    /// `User-agent:` groups are matched against (its product token — the
+    /// part before any `/` or space — also matches, per RFC 9309).
     pub fn new(user_agent: &str) -> Self {
         Self {
             cache: HashMap::new(),

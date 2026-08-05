@@ -24,6 +24,7 @@ use crate::fetchers::response::Response;
 ///
 /// Returns `false` for non-DuckDuckGo responses, so it is safe to call on any
 /// response.
+#[must_use]
 pub fn is_duckduckgo_blocked(response: &Response) -> bool {
     if !response.url().contains("duckduckgo.com") {
         return false;
@@ -43,6 +44,7 @@ pub fn is_duckduckgo_blocked(response: &Response) -> bool {
 /// This prepends a scheme to protocol-relative hrefs, then extracts and
 /// percent-decodes the `uddg` parameter. Any href that is not a DuckDuckGo
 /// redirect is returned unchanged.
+#[must_use]
 pub fn decode_duckduckgo_href(href: &str) -> String {
     let full = if let Some(stripped) = href.strip_prefix("//") {
         format!("https://{}", stripped)

@@ -35,19 +35,24 @@ pub const DEFAULT_RELOCATION_PERCENTAGE: f64 = 40.0;
 /// page structure changes. Mirrors upstream `_StorageTools.element_to_dict`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ElementData {
+    /// The element's tag name.
     pub tag: String,
     /// Attributes with whitespace-stripped values; empty values are dropped.
     #[serde(default)]
     pub attributes: IndexMap<String, String>,
+    /// Trimmed direct text content, `None` when empty.
     #[serde(default)]
     pub text: Option<String>,
     /// Tag names from the root element down to this element.
     #[serde(default)]
     pub path: Vec<String>,
+    /// The parent element's tag name, if the parent is an element.
     #[serde(default)]
     pub parent_name: Option<String>,
+    /// The parent element's attributes (values unstripped).
     #[serde(default)]
     pub parent_attribs: IndexMap<String, String>,
+    /// The parent's trimmed direct text content, `None` when empty.
     #[serde(default)]
     pub parent_text: Option<String>,
     /// Tag names of the parent's other element children.
@@ -60,6 +65,7 @@ pub struct ElementData {
 
 impl Selector {
     /// Capture this element's unique properties for adaptive relocation.
+    #[must_use]
     pub fn element_data(&self) -> ElementData {
         let mut data = ElementData {
             tag: self.tag().to_string(),
@@ -143,6 +149,7 @@ impl Selector {
     /// is scored against `original`; the group with the highest score is
     /// returned if it reaches `percentage` (see
     /// [`DEFAULT_RELOCATION_PERCENTAGE`]), otherwise an empty collection.
+    #[must_use]
     pub fn relocate(&self, original: &ElementData, percentage: f64) -> Selectors {
         let mut best_score = f64::MIN;
         let mut best: Vec<Selector> = Vec::new();
@@ -224,8 +231,13 @@ impl Selector {
     }
 }
 
-/// Percentage similarity between a stored element and a candidate. Port of
-/// upstream `__calculate_similarity_score`, rounded to two decimals.
+/// Percentage similarity (`0.0..=100.0`) between a stored element and a
+/// candidate. Port of upstream `__calculate_similarity_score`, rounded to
+/// two decimals: the mean of per-feature similarity checks (tag, text,
+/// attributes with extra weight on `class`/`id`/`href`/`src`, tree path,
+/// parent context, siblings), where only features present in `original`
+/// are checked.
+#[must_use]
 pub fn similarity_score(original: &ElementData, candidate: &ElementData) -> f64 {
     let mut score = 0.0;
     let mut checks = 0u32;

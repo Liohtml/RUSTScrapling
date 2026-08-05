@@ -1,33 +1,46 @@
+//! Crawl outputs: the scraped [`ItemList`] with CSV/JSON/JSONL/XML export,
+//! live [`CrawlStats`], and the [`CrawlResult`] returned by
+//! [`CrawlerEngine::crawl`](crate::spiders::engine::CrawlerEngine::crawl).
+
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Instant;
 
-/// A list of scraped items (JSON values).
+/// A list of scraped items (JSON values), exportable to JSON, JSON Lines,
+/// CSV, and XML.
 #[derive(Debug, Clone, Default)]
 pub struct ItemList {
     items: Vec<serde_json::Value>,
 }
 
 impl ItemList {
+    /// Create an empty list.
     pub fn new() -> Self {
         Self { items: Vec::new() }
     }
 
+    /// Append one item.
     pub fn push(&mut self, item: serde_json::Value) {
         self.items.push(item);
     }
 
+    /// Number of items in the list.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.items.len()
     }
 
+    /// Whether the list is empty.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
 
-    /// Write items as a JSON array to a file.
+    /// Write the items as one JSON array to a file — pretty-printed when
+    /// `indent > 0`, compact otherwise (the exact indent width is not
+    /// configurable).
     pub fn to_json(&self, path: &Path, indent: usize) -> io::Result<()> {
         let buf = if indent > 0 {
             serde_json::to_vec_pretty(&self.items).map_err(io::Error::other)?
@@ -37,7 +50,8 @@ impl ItemList {
         fs::write(path, buf)
     }
 
-    /// Write items as JSON Lines to a file.
+    /// Write the items as JSON Lines (one compact JSON value per line) to
+    /// a file.
     pub fn to_jsonl(&self, path: &Path) -> io::Result<()> {
         let mut file = fs::File::create(path)?;
         for item in &self.items {
@@ -215,24 +229,45 @@ impl IntoIterator for ItemList {
     }
 }
 
-/// Statistics gathered during a crawl.
+/// Statistics gathered during a crawl, updated live by the engine and
+/// returned in the final [`CrawlResult`].
 #[derive(Debug, Clone)]
 pub struct CrawlStats {
+    /// Live (non-cache) responses received, regardless of status.
     pub requests_count: u64,
+    /// The spider's configured global concurrency limit (copied at crawl
+    /// start, informational).
     pub concurrent_requests: u32,
+    /// The spider's configured per-domain concurrency limit (0 = none).
     pub concurrent_requests_per_domain: u32,
+    /// Requests that failed at the network/session level (after the
+    /// fetcher's own retries).
     pub failed_requests_count: u64,
+    /// Requests dropped by the `allowed_domains` filter (including URLs
+    /// with no parseable host).
     pub offsite_requests_count: u64,
+    /// Requests dropped because robots.txt disallowed them.
     pub robots_disallowed_count: u64,
+    /// Requests served from the development-mode cache.
     pub cache_hits: u64,
+    /// Requests that checked the dev cache and found no usable entry.
     pub cache_misses: u64,
+    /// Total decoded response bytes across all live responses.
     pub response_bytes: u64,
+    /// Items kept after the `on_scraped_item` pipeline.
     pub items_scraped: u64,
+    /// Items dropped by the `on_scraped_item` pipeline (it returned
+    /// `None`).
     pub items_dropped: u64,
+    /// Responses classified as blocked (each may trigger a retry).
     pub blocked_requests_count: u64,
+    /// The spider's configured download delay in seconds (informational).
     pub download_delay: f64,
+    /// When the crawl started; set by the engine at the top of `crawl()`.
     pub start_time: Option<Instant>,
+    /// When the crawl ended; `None` while it is still running.
     pub end_time: Option<Instant>,
+    /// Count of live responses per HTTP status code.
     pub response_status_count: HashMap<u16, u64>,
     /// Decoded response bytes per domain, populated by the engine on every
     /// live (non-cache) response.
@@ -272,18 +307,24 @@ impl Default for CrawlStats {
 }
 
 impl CrawlStats {
+    /// Bump the live-response counter by one.
     pub fn increment_requests_count(&mut self) {
         self.requests_count += 1;
     }
 
+    /// Bump the per-status counter for `status` by one.
     pub fn increment_status(&mut self, status: u16) {
         *self.response_status_count.entry(status).or_insert(0) += 1;
     }
 
+    /// Add `bytes` to the total decoded response bytes.
     pub fn increment_response_bytes(&mut self, bytes: u64) {
         self.response_bytes += bytes;
     }
 
+    /// Wall-clock duration of the crawl in seconds: end minus start when
+    /// finished, time since start while still running, `0.0` before start.
+    #[must_use]
     pub fn elapsed_seconds(&self) -> f64 {
         match (self.start_time, self.end_time) {
             (Some(start), Some(end)) => end.duration_since(start).as_secs_f64(),
@@ -292,6 +333,9 @@ impl CrawlStats {
         }
     }
 
+    /// Average live requests per second over [`CrawlStats::elapsed_seconds`]
+    /// (`0.0` when no time has elapsed).
+    #[must_use]
     pub fn requests_per_second(&self) -> f64 {
         let elapsed = self.elapsed_seconds();
         if elapsed > 0.0 {
@@ -302,15 +346,22 @@ impl CrawlStats {
     }
 }
 
-/// Result of a crawl run.
+/// Result of a crawl run, returned by
+/// [`CrawlerEngine::crawl`](crate::spiders::engine::CrawlerEngine::crawl).
 #[derive(Debug)]
 pub struct CrawlResult {
+    /// Statistics gathered during the crawl.
     pub stats: CrawlStats,
+    /// All items scraped (and kept by the item pipeline).
     pub items: ItemList,
+    /// `true` when the crawl was paused (a checkpoint was written) rather
+    /// than run to completion.
     pub paused: bool,
 }
 
 impl CrawlResult {
+    /// Whether the crawl ran to completion (the opposite of `paused`).
+    #[must_use]
     pub fn completed(&self) -> bool {
         !self.paused
     }

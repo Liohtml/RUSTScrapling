@@ -1,9 +1,20 @@
+//! The [`Fetcher`] HTTP client: retries, stealth headers, proxy rotation,
+//! redirect policy, and response-size protection on top of reqwest.
+
 use crate::fetchers::config::FetcherConfig;
 use crate::fetchers::proxy::ProxyRotator;
 use crate::fetchers::response::Response;
 use std::collections::HashMap;
 use std::time::Duration;
 
+/// Async HTTP client configured through [`FetcherConfig`].
+///
+/// Every request applies the config's headers (with browser-like stealth
+/// headers when enabled), retries failed sends up to `config.retries`
+/// times with a fixed delay between attempts, enforces the configured
+/// response-size cap while streaming the body, and decodes the body using
+/// the charset advertised in `Content-Type`. With `proxy_list` set, one
+/// client is built per proxy and requests rotate through them round-robin.
 pub struct Fetcher {
     config: FetcherConfig,
     /// One client per rotating proxy when rotation is enabled, otherwise a
@@ -12,10 +23,16 @@ pub struct Fetcher {
     rotator: Option<ProxyRotator>,
 }
 
+/// Errors from building a [`Fetcher`] or performing a request.
 #[derive(Debug, thiserror::Error)]
 pub enum FetcherError {
+    /// The request could not be completed: every retry attempt failed, the
+    /// response body exceeded the configured size cap, or a body chunk
+    /// could not be read. The message carries the underlying cause.
     #[error("Request failed after retries: {0}")]
     RequestFailed(String),
+    /// The underlying reqwest client failed to build (e.g. TLS backend
+    /// initialization).
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 }
@@ -127,11 +144,15 @@ impl Fetcher {
         }
     }
 
+    /// Send a GET request.
     pub async fn get(&self, url: &str) -> Result<Response, FetcherError> {
         self.request(reqwest::Method::GET, url, None, None, None)
             .await
     }
 
+    /// Send a POST request with an optional plain-text `body` or a `json`
+    /// payload (which also sets `Content-Type: application/json`). When
+    /// both are given, `json` wins.
     pub async fn post(
         &self,
         url: &str,
@@ -142,6 +163,9 @@ impl Fetcher {
             .await
     }
 
+    /// Send a PUT request with an optional plain-text `body` or a `json`
+    /// payload (which also sets `Content-Type: application/json`). When
+    /// both are given, `json` wins.
     pub async fn put(
         &self,
         url: &str,
@@ -152,6 +176,7 @@ impl Fetcher {
             .await
     }
 
+    /// Send a DELETE request.
     pub async fn delete(&self, url: &str) -> Result<Response, FetcherError> {
         self.request(reqwest::Method::DELETE, url, None, None, None)
             .await

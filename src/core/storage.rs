@@ -1,9 +1,19 @@
+//! SQLite persistence for adaptive element relocation: element snapshots
+//! saved by [`Selector::save`](crate::parser::Selector::save) live here,
+//! keyed by page URL plus a hashed identifier.
+
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 
 /// SQLite-backed storage for adaptive element relocation.
+///
+/// One `SqliteStorage` is scoped to a single page URL (lowercased at
+/// construction): rows are keyed by `(url, identifier)`, so the same
+/// identifier can be reused across different pages without collisions. The
+/// connection is guarded by a mutex, making the storage safe to share
+/// across threads.
 pub struct SqliteStorage {
     conn: Mutex<Connection>,
     url: String,
@@ -11,7 +21,9 @@ pub struct SqliteStorage {
 }
 
 impl SqliteStorage {
-    /// Create storage backed by SQLite file. URL is normalized to lowercase.
+    /// Open (creating if needed) the SQLite database at `db_path`, scoped
+    /// to `url`. The URL is normalized to lowercase; the database uses WAL
+    /// journaling and gets its schema created on first use.
     pub fn new(db_path: &str, url: &str) -> Result<Self, StorageError> {
         let conn = Self::open(db_path)?;
         Ok(Self {
@@ -56,7 +68,8 @@ impl SqliteStorage {
         }
     }
 
-    /// Save element data. Uses INSERT OR REPLACE for upsert.
+    /// Save element data under `identifier` for this storage's URL,
+    /// replacing any previous entry (INSERT OR REPLACE upsert).
     pub fn save(
         &self,
         identifier: &str,
@@ -72,7 +85,9 @@ impl SqliteStorage {
         Ok(())
     }
 
-    /// Retrieve stored element data.
+    /// Retrieve the element data stored under `identifier` for this
+    /// storage's URL. Returns `Ok(None)` when nothing was saved yet; real
+    /// database errors propagate as `Err`.
     pub fn retrieve(
         &self,
         identifier: &str,
@@ -103,10 +118,14 @@ impl SqliteStorage {
     }
 }
 
+/// Errors from [`SqliteStorage`] operations.
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
+    /// The underlying SQLite operation failed (I/O, locking, schema, …).
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// Element data could not be serialized to, or deserialized from, its
+    /// stored JSON form.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 }

@@ -1,3 +1,6 @@
+//! The [`Selector`] type: a handle to one node of a parsed HTML tree with
+//! CSS querying, text extraction, DOM navigation, regex, and JSON helpers.
+
 use crate::core::{AttributesHandler, TextHandler};
 use crate::parser::selectors::Selectors;
 use ego_tree::NodeId;
@@ -9,6 +12,11 @@ use url::Url;
 
 /// A wrapper around a node in an HTML tree, providing CSS selection,
 /// text extraction, DOM navigation, regex, and JSON parsing.
+///
+/// Cloning is cheap: all `Selector`s produced from the same document share
+/// one reference-counted tree, and a clone only copies the node handle.
+/// Query methods ([`Selector::css`], [`Selector::children`], …) return new
+/// `Selector`s pointing into that same shared tree.
 #[derive(Debug, Clone)]
 pub struct Selector {
     tree: Rc<Html>,
@@ -28,7 +36,8 @@ impl Selector {
         }
     }
 
-    /// Parse an HTML document string with a base URL for link resolution.
+    /// Parse an HTML document string with a base URL used by
+    /// [`Selector::urljoin`] to resolve relative links.
     pub fn from_html_with_url(html: &str, url: &str) -> Self {
         let parsed = Html::parse_document(html);
         let root_id = parsed.tree.root().id();
@@ -75,12 +84,17 @@ impl Selector {
     /// Stable identity of the underlying DOM node. Useful for comparing two
     /// `Selector`s that reference the same node without resorting to HTML
     /// string equality (which is ambiguous for identical siblings).
+    #[must_use]
     pub fn node_id(&self) -> NodeId {
         self.node_id
     }
 
     /// Return the tag name of this element.
-    /// Returns "html" for the document root, "#text" for text nodes.
+    ///
+    /// Non-element nodes get placeholder names: `"html"` for the document
+    /// root, `"#text"` for text nodes, `"#comment"` for comments,
+    /// `"#doctype"` for doctypes, and `"#pi"` for processing instructions.
+    #[must_use]
     pub fn tag(&self) -> &str {
         let node = self.node_ref();
         match node.value() {
@@ -94,7 +108,10 @@ impl Selector {
     }
 
     /// Return the direct (non-recursive) text content of this element.
-    /// Only collects immediate text children, not text inside child elements.
+    /// Only collects immediate text children, not text inside child
+    /// elements — for the full recursive text use
+    /// [`Selector::get_all_text`].
+    #[must_use]
     pub fn text(&self) -> TextHandler {
         let node = self.node_ref();
         let mut text = String::new();
@@ -106,7 +123,9 @@ impl Selector {
         TextHandler::new(text)
     }
 
-    /// Return the element's attributes as an AttributesHandler.
+    /// Return the element's attributes as an [`AttributesHandler`]
+    /// (empty for non-element nodes).
+    #[must_use]
     pub fn attrib(&self) -> AttributesHandler {
         if let Some(el) = self.element_ref() {
             let attrs = el
@@ -119,7 +138,10 @@ impl Selector {
         }
     }
 
-    /// Return the inner HTML of this element as a TextHandler.
+    /// Return the inner HTML of this element (its children serialized,
+    /// without the element's own tag). For the document root this is the
+    /// whole serialized document; for other non-element nodes it is empty.
+    #[must_use]
     pub fn html_content(&self) -> TextHandler {
         if let Some(el) = self.element_ref() {
             TextHandler::new(el.inner_html())
@@ -130,7 +152,10 @@ impl Selector {
         }
     }
 
-    /// Return the outer HTML of this element as a TextHandler.
+    /// Return the outer HTML of this element (the element itself including
+    /// its tag and children). For the document root this is the whole
+    /// serialized document; for other non-element nodes it is empty.
+    #[must_use]
     pub fn outer_html(&self) -> TextHandler {
         if let Some(el) = self.element_ref() {
             TextHandler::new(el.html())
@@ -141,8 +166,15 @@ impl Selector {
         }
     }
 
-    /// Recursively extract text, skipping tags in `ignore_tags`.
-    /// If `valid_values` is Some, only include text nodes whose trimmed content is in the set.
+    /// Recursively extract all text under this node, joined with
+    /// `separator`.
+    ///
+    /// Elements whose tag is in `ignore_tags` are skipped along with their
+    /// entire subtree (e.g. pass `&["script", "style"]` to drop scripts).
+    /// With `strip`, each text node is trimmed and empty ones are dropped
+    /// before joining. If `valid_values` is `Some`, only text nodes whose
+    /// trimmed content appears in the slice are included.
+    #[must_use]
     pub fn get_all_text(
         &self,
         separator: &str,
@@ -195,7 +227,13 @@ impl Selector {
         }
     }
 
-    /// Run a CSS selector query and return matching elements as Selectors.
+    /// Run a CSS selector query and return matching descendant elements.
+    ///
+    /// Matches are returned in document order. An invalid selector yields
+    /// an empty collection rather than an error. Only plain CSS is accepted
+    /// here — for `::text` / `::attr(name)` extraction use
+    /// [`Selector::css_get`] / [`Selector::css_getall`].
+    #[must_use]
     pub fn css(&self, selector: &str) -> Selectors {
         let css_sel = match scraper::Selector::parse(selector) {
             Ok(s) => s,
@@ -233,6 +271,7 @@ impl Selector {
     ///   that has the attribute (elements without it are skipped, matching
     ///   Parsel),
     /// - a plain selector — each match's outer HTML.
+    #[must_use]
     pub fn css_getall(&self, query: &str) -> Vec<TextHandler> {
         let q = crate::parser::translator::parse_css_query(query);
         self.css(&q.selector)
@@ -263,11 +302,13 @@ impl Selector {
     /// Like [`Self::css_getall`], but returns only the first extracted
     /// value (Parsel's `.get()`): for `::attr`/`::text` queries this is the
     /// first element that actually has a value, not merely the first match.
+    #[must_use]
     pub fn css_get(&self, query: &str) -> Option<TextHandler> {
         self.css_getall(query).into_iter().next()
     }
 
-    /// Return direct element children.
+    /// Return direct element children (text and comment nodes are skipped).
+    #[must_use]
     pub fn children(&self) -> Selectors {
         let node = self.node_ref();
         let items: Vec<Selector> = node
@@ -278,13 +319,17 @@ impl Selector {
         Selectors::new(items)
     }
 
-    /// Return the parent element, if any.
+    /// Return the parent node, if any. Note the parent of a top-level
+    /// element is the document root, not an element.
+    #[must_use]
     pub fn parent(&self) -> Option<Selector> {
         let node = self.node_ref();
         node.parent().map(|p| self.child_selector(p.id()))
     }
 
-    /// Return sibling elements (excluding self).
+    /// Return sibling elements (all of the parent's element children
+    /// except this node), in document order.
+    #[must_use]
     pub fn siblings(&self) -> Selectors {
         let node = self.node_ref();
         let self_id = self.node_id;
@@ -302,7 +347,9 @@ impl Selector {
         Selectors::new(items)
     }
 
-    /// Return the next sibling element.
+    /// Return the next sibling *element*, skipping intervening text and
+    /// comment nodes.
+    #[must_use]
     pub fn next(&self) -> Option<Selector> {
         let mut node = self.node_ref();
         while let Some(sibling) = node.next_sibling() {
@@ -314,7 +361,9 @@ impl Selector {
         None
     }
 
-    /// Return the previous sibling element.
+    /// Return the previous sibling *element*, skipping intervening text and
+    /// comment nodes.
+    #[must_use]
     pub fn previous(&self) -> Option<Selector> {
         let mut node = self.node_ref();
         while let Some(sibling) = node.prev_sibling() {
@@ -326,7 +375,9 @@ impl Selector {
         None
     }
 
-    /// Check whether this element has a given CSS class.
+    /// Check whether this element has a given CSS class
+    /// (case-sensitive; `false` for non-element nodes).
+    #[must_use]
     pub fn has_class(&self, class_name: &str) -> bool {
         if let Some(el) = self.element_ref() {
             el.value()
@@ -336,7 +387,11 @@ impl Selector {
         }
     }
 
-    /// Join a relative URL with the base URL of this selector.
+    /// Join a relative URL with the base URL of this selector (set via
+    /// [`Selector::from_html_with_url`]). Falls back to returning
+    /// `relative_url` unchanged when there is no base URL or either URL
+    /// fails to parse.
+    #[must_use]
     pub fn urljoin(&self, relative_url: &str) -> String {
         if self.url.is_empty() {
             return relative_url.to_string();
@@ -350,7 +405,11 @@ impl Selector {
         }
     }
 
-    /// Apply a regex pattern against the full recursive text of this element.
+    /// Apply a regex pattern against the full recursive text of this
+    /// element, returning all matches. When the pattern has capture
+    /// groups, group 1 is returned for each match, otherwise the whole
+    /// match. See [`TextHandler::re`] for the flag semantics.
+    #[must_use]
     pub fn re(
         &self,
         pattern: &str,
@@ -362,7 +421,9 @@ impl Selector {
         text_handler.re(pattern, replace_entities, clean_match, case_sensitive)
     }
 
-    /// Apply a regex and return only the first match.
+    /// Apply a regex against the full recursive text of this element and
+    /// return only the first match (see [`Selector::re`]).
+    #[must_use]
     pub fn re_first(
         &self,
         pattern: &str,
@@ -374,13 +435,25 @@ impl Selector {
         text_handler.re_first(pattern, replace_entities, clean_match, case_sensitive)
     }
 
-    /// Parse the text content of this element as JSON.
+    /// Parse the *direct* text content of this element (see
+    /// [`Selector::text`]) as JSON — useful for `<script
+    /// type="application/ld+json">` blocks and similar.
     pub fn json(&self) -> Result<serde_json::Value, serde_json::Error> {
         let text = self.text();
         text.json()
     }
 
-    /// Find an element by its text content.
+    /// Find a single element by its text content.
+    ///
+    /// An element matches when its full recursive text (equivalent of
+    /// [`Selector::get_all_text`]) equals `text` after trimming — or merely
+    /// contains it when `partial` is set. Because a container's recursive
+    /// text includes everything inside it, matching prefers the deepest
+    /// (most specific) element: with `first_match` the search descends
+    /// before testing each element and returns the first, deepest match in
+    /// document order; with `first_match == false` the *last* matching
+    /// element is returned instead.
+    #[must_use]
     pub fn find_by_text(
         &self,
         text: &str,
@@ -397,7 +470,10 @@ impl Selector {
         }
     }
 
-    /// Find all elements matching the given text.
+    /// Find all elements whose full recursive text matches `text` (same
+    /// matching rules as [`Selector::find_by_text`]), in document order
+    /// with containers before their matching descendants.
+    #[must_use]
     pub fn find_all_by_text(&self, text: &str, partial: bool, case_sensitive: bool) -> Selectors {
         let mut results = Vec::new();
         self.find_all_text_recursive(self.node_ref(), text, partial, case_sensitive, &mut results);
@@ -461,7 +537,13 @@ impl Selector {
         }
     }
 
-    /// Find an element whose text matches a regex pattern.
+    /// Find an element whose full recursive text matches a regex pattern.
+    ///
+    /// With `first_match` the first matching element in a pre-order walk is
+    /// returned (a container matches before its descendants, since its
+    /// recursive text includes theirs); otherwise the last match wins. An
+    /// invalid pattern returns `None`.
+    #[must_use]
     pub fn find_by_regex(
         &self,
         pattern: &str,
@@ -525,7 +607,9 @@ impl Selector {
         }
     }
 
-    /// Get the value of a specific attribute as a TextHandler.
+    /// Get the value of a specific attribute, or `None` when the attribute
+    /// is absent or this is not an element node.
+    #[must_use]
     pub fn get_attribute(&self, key: &str) -> Option<TextHandler> {
         if let Some(el) = self.element_ref() {
             el.value().attr(key).map(TextHandler::new)

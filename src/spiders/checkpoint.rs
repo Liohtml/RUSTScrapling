@@ -1,12 +1,21 @@
+//! Crawl checkpoints for pause/resume: on pause the engine persists the
+//! scheduler's pending requests and dedup set as `checkpoint.json`
+//! (written atomically), and the next run restores them instead of
+//! starting over. See
+//! [`CrawlerEngine::request_pause`](crate::spiders::engine::CrawlerEngine::request_pause).
+
 use super::request::SpiderRequest;
 use std::io::Write;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
 
+/// Reads and writes the `checkpoint.json` file in a crawl's checkpoint
+/// directory.
 pub struct CheckpointManager {
     checkpoint_dir: PathBuf,
 }
 
+/// The persisted state of a paused crawl.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct CheckpointData {
     /// Full pending requests — method, headers, body, meta, priority and all
@@ -19,11 +28,15 @@ pub struct CheckpointData {
     /// `pending_requests` instead.
     #[serde(default)]
     pub pending_urls: Vec<String>,
+    /// The scheduler's dedup set: one fingerprint per unique URL enqueued
+    /// before the pause, so a resumed crawl does not re-visit them.
     pub seen_fingerprints: Vec<String>,
+    /// Number of items scraped before the pause (informational).
     pub items_count: u64,
 }
 
 impl CheckpointManager {
+    /// Open a checkpoint directory, creating it if needed.
     pub fn new(dir: &str) -> Result<Self, std::io::Error> {
         let path = PathBuf::from(dir);
         std::fs::create_dir_all(&path)?;
@@ -32,6 +45,8 @@ impl CheckpointManager {
         })
     }
 
+    /// Persist `data` as `checkpoint.json`, atomically replacing any
+    /// previous checkpoint (a crash mid-write cannot corrupt the old one).
     pub async fn save(&self, data: &CheckpointData) -> Result<(), std::io::Error> {
         let file_path = self.checkpoint_dir.join("checkpoint.json");
         let dir = self.checkpoint_dir.clone();
@@ -55,17 +70,23 @@ impl CheckpointManager {
         .map_err(std::io::Error::other)?
     }
 
+    /// Load the stored checkpoint, or `None` when there is none or it
+    /// cannot be read/parsed.
     pub async fn restore(&self) -> Option<CheckpointData> {
         let file_path = self.checkpoint_dir.join("checkpoint.json");
         let data = tokio::fs::read_to_string(&file_path).await.ok()?;
         serde_json::from_str(&data).ok()
     }
 
+    /// Delete the checkpoint file (called after a crawl completes so the
+    /// next run starts fresh). Missing files are ignored.
     pub async fn cleanup(&self) {
         let file_path = self.checkpoint_dir.join("checkpoint.json");
         let _ = tokio::fs::remove_file(file_path).await;
     }
 
+    /// Whether a checkpoint file exists.
+    #[must_use]
     pub fn exists(&self) -> bool {
         self.checkpoint_dir.join("checkpoint.json").exists()
     }

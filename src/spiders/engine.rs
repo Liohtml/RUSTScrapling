@@ -1,3 +1,7 @@
+//! The [`CrawlerEngine`]: the async crawl loop that drives a
+//! [`Spider`] — scheduling, concurrency limits, robots.txt, throttling,
+//! caching, checkpointing, and stats collection.
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -53,6 +57,21 @@ impl Drop for ActiveTaskGuard {
     }
 }
 
+/// Runs a [`Spider`] to completion (or until paused).
+///
+/// The engine dequeues requests by priority and processes them
+/// concurrently up to the spider's global and per-domain limits. Each
+/// request goes through robots.txt checks (when enabled), the
+/// allowed-domains filter, the dev-mode cache, politeness delays (static
+/// or AutoThrottle), the session fetch, blocked-response detection with
+/// retries, and finally the spider's `parse` callback — whose items are
+/// piped through `on_scraped_item` and whose follow-up requests are
+/// enqueued (deduplicated).
+///
+/// Construct with [`CrawlerEngine::new`], run with
+/// [`CrawlerEngine::crawl`], and optionally pause a running crawl with
+/// [`CrawlerEngine::request_pause`] — a paused crawl writes a checkpoint
+/// that the next run restores automatically.
 pub struct CrawlerEngine<S: Spider> {
     spider: Arc<S>,
     session_manager: Arc<SessionManager>,
@@ -75,6 +94,12 @@ pub struct CrawlerEngine<S: Spider> {
 }
 
 impl<S: Spider> CrawlerEngine<S> {
+    /// Build an engine for `spider`.
+    ///
+    /// `session_manager` provides the HTTP sessions (its `"default"`
+    /// session is created here if missing — the reason this can fail with
+    /// [`FetcherError`]). `crawl_dir` overrides where the dev cache and
+    /// checkpoints live; `None` uses `.scrapling/<spider name>/`.
     pub fn new(
         spider: Arc<S>,
         mut session_manager: SessionManager,
@@ -146,10 +171,25 @@ impl<S: Spider> CrawlerEngine<S> {
         })
     }
 
+    /// Ask a running crawl to pause. The crawl loop stops dispatching,
+    /// waits for in-flight requests to finish, writes a checkpoint
+    /// (pending requests plus the dedup set), and returns a
+    /// [`CrawlResult`] with `paused == true`. The next
+    /// [`CrawlerEngine::crawl`] with the same spider/crawl dir resumes
+    /// from that checkpoint.
     pub fn request_pause(&self) {
         self.paused.store(true, Ordering::SeqCst);
     }
 
+    /// Run the crawl to completion (or until paused) and return the
+    /// scraped items and stats.
+    ///
+    /// Restores a checkpoint if one exists (skipping the start requests),
+    /// pre-fetches robots.txt for the seed origins when the spider obeys
+    /// robots.txt, then drives the crawl loop until the queue is empty and
+    /// no tasks are in flight. On normal completion the checkpoint is
+    /// cleaned up; on pause it is written (see
+    /// [`CrawlerEngine::request_pause`]).
     pub async fn crawl(self) -> CrawlResult {
         // Set start time and config in stats
         {
