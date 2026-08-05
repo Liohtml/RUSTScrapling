@@ -198,7 +198,12 @@ impl<S: Spider> CrawlerEngine<S> {
                     .and_then(|u| u.host_str().map(|h| h.to_string()))
                 {
                     if domains_seen.insert(domain.clone()) {
-                        robots.lock().await.fetch_robots(&domain).await;
+                        // Same lock discipline as the lazy path in
+                        // process_request: fetch without holding the manager
+                        // lock (uncontended here, but consistent).
+                        let user_agent = robots.lock().await.user_agent().to_string();
+                        let rules = RobotsTxtManager::fetch_rules(&user_agent, &domain).await;
+                        robots.lock().await.insert_rules(&domain, rules);
                     }
                 }
             }
@@ -234,12 +239,18 @@ impl<S: Spider> CrawlerEngine<S> {
                     // cache skip the delay — replays hit disk, not the site,
                     // so there is nothing to be polite to.
                     let delay = self.spider.download_delay();
+                    let mut delay_was_skipped = false;
                     if delay > 0.0 {
                         let served_from_cache = match &self.cache {
                             Some(c) => c.contains(req.url()).await,
                             None => false,
                         };
-                        if !served_from_cache {
+                        if served_from_cache {
+                            // process_request re-applies the delay if the
+                            // entry then turns out unreadable and the request
+                            // goes to the live site after all.
+                            delay_was_skipped = true;
+                        } else {
                             tokio::time::sleep(Duration::from_secs_f64(delay)).await;
                         }
                     }
@@ -292,6 +303,14 @@ impl<S: Spider> CrawlerEngine<S> {
                         // the task. This task holds a global permit while it
                         // waits, but the dispatch loop stays free to spawn
                         // work for other domains up to the global cap.
+                        // Residual limitation: N same-domain requests still
+                        // soak N global permits while parked here, so a
+                        // saturated domain can eventually exhaust the global
+                        // cap too — bounded head-of-line, fully fixable only
+                        // with per-domain queues (Scrapy downloader-slot
+                        // style). On pause, parked tasks drain serially
+                        // through the domain permit before the checkpoint is
+                        // written (no data loss, just added pause latency).
                         let _domain_permit = match domain_sem {
                             Some(sem) => sem.acquire_owned().await.ok(),
                             None => None,
@@ -306,6 +325,7 @@ impl<S: Spider> CrawlerEngine<S> {
                             robots_manager,
                             cache,
                             req,
+                            delay_was_skipped,
                         )
                         .await;
                     });
@@ -379,6 +399,11 @@ impl<S: Spider> CrawlerEngine<S> {
         robots_manager: Option<Arc<Mutex<RobotsTxtManager>>>,
         cache: Option<Arc<ResponseCache>>,
         request: SpiderRequest,
+        // True when the dispatch loop skipped the download delay because
+        // this URL appeared to be in the dev cache. If the entry then turns
+        // out unreadable (corrupt/deleted between check and read), the miss
+        // path below owes the site that delay before fetching live.
+        delay_was_skipped: bool,
     ) {
         let url = request.url().to_string();
 
@@ -458,6 +483,18 @@ impl<S: Spider> CrawlerEngine<S> {
                 return;
             } else {
                 stats.lock().await.cache_misses += 1;
+                // The dispatch loop skipped the politeness delay because a
+                // cache entry existed — but it could not be read (corrupt,
+                // schema drift, or deleted since the check), so this request
+                // is about to hit the live site after all. Apply the owed
+                // delay now; without this, a directory of unreadable entries
+                // would let the whole crawl run undelayed.
+                if delay_was_skipped {
+                    let d = spider.download_delay();
+                    if d > 0.0 {
+                        tokio::time::sleep(Duration::from_secs_f64(d)).await;
+                    }
+                }
             }
         }
 

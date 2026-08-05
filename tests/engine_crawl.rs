@@ -318,12 +318,65 @@ async fn cached_responses_skip_the_download_delay() {
     );
 }
 
+#[tokio::test]
+async fn unreadable_cache_entry_still_applies_download_delay() {
+    // The dispatch loop skips the delay when a cache entry EXISTS — but if
+    // that entry cannot be parsed, the request falls through to a live
+    // fetch. The politeness delay must then be applied in the miss path,
+    // otherwise corrupt entries would let the crawl hit the site undelayed.
+    let (addr, _max, server) = spawn_counting_server(vec![std::time::Duration::ZERO]).await;
+    let url = format!("http://{}/page", addr);
+
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().to_str().unwrap().to_string();
+
+    // Seed a valid entry, then corrupt the file in place (the cache's
+    // filename is an internal hash, so locate the single entry on disk).
+    seed_cache(&base, std::slice::from_ref(&url)).await;
+    let cache_dir = format!("{}/cache", base);
+    let entry = std::fs::read_dir(&cache_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .find(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .expect("seeded cache entry exists");
+    std::fs::write(entry.path(), "definitely not json").unwrap();
+
+    let spider = Arc::new(DelayedCacheSpider {
+        urls: vec![url],
+        delay: 1.0,
+    });
+    let engine = CrawlerEngine::new(
+        spider,
+        SessionManager::new(FetcherConfig::default()),
+        Some(&base),
+    )
+    .expect("engine builds");
+
+    let started = std::time::Instant::now();
+    let result = engine.crawl().await;
+    let elapsed = started.elapsed();
+
+    tokio::time::timeout(std::time::Duration::from_secs(30), server)
+        .await
+        .expect("live fetch must reach the server")
+        .unwrap();
+    assert_eq!(result.items.len(), 1);
+    assert_eq!(result.stats.cache_misses, 1, "corrupt entry counts as miss");
+    assert!(
+        elapsed.as_secs_f64() >= 1.0,
+        "the owed politeness delay must be applied before the live fetch; \
+         took only {:?}",
+        elapsed
+    );
+}
+
 /// Minimal HTTP/1.1 server on a local port that tracks how many requests it
-/// is serving simultaneously, sleeping briefly per request so overlaps would
-/// be observable. Returns (addr, max_concurrency_handle, join_handle).
+/// is serving simultaneously. `holds` gives the per-request sleep before
+/// responding (indexed by accept order; one entry per expected request), so
+/// tests can make overlaps observable — or hold only the first request.
+/// Returns (addr, max_concurrency_handle, join_handle).
 async fn spawn_counting_server(
-    expected_requests: usize,
-    hold: std::time::Duration,
+    holds: Vec<std::time::Duration>,
 ) -> (
     std::net::SocketAddr,
     Arc<std::sync::atomic::AtomicUsize>,
@@ -340,7 +393,7 @@ async fn spawn_counting_server(
     let max_out = max_seen.clone();
 
     let handle = tokio::spawn(async move {
-        for _ in 0..expected_requests {
+        for hold in holds {
             let (mut socket, _) = listener.accept().await.unwrap();
             let current = current.clone();
             let max_seen = max_seen.clone();
@@ -421,7 +474,7 @@ async fn per_domain_cap_still_enforced_with_in_task_acquisition() {
     // per_domain=1 and 3 requests to one host, the server must never observe
     // two requests in flight at once.
     let hold = std::time::Duration::from_millis(150);
-    let (addr, max_concurrent, server) = spawn_counting_server(3, hold).await;
+    let (addr, max_concurrent, server) = spawn_counting_server(vec![hold; 3]).await;
 
     let urls: Vec<String> = (0..3)
         .map(|i| format!("http://{}/page/{}", addr, i))
@@ -434,7 +487,12 @@ async fn per_domain_cap_still_enforced_with_in_task_acquisition() {
         .expect("engine builds");
 
     let result = engine.crawl().await;
-    server.await.unwrap();
+    // Timeout so a missing request fails the test crisply instead of
+    // hanging the whole CI job on a join that never completes.
+    tokio::time::timeout(std::time::Duration::from_secs(30), server)
+        .await
+        .expect("server must see all expected requests")
+        .unwrap();
 
     assert_eq!(result.items.len(), urls.len(), "all pages fetched");
     assert_eq!(
@@ -496,9 +554,15 @@ async fn saturated_domain_does_not_stall_dispatch_of_other_domains() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    let hold = std::time::Duration::from_millis(1000);
-    // Host A: 127.0.0.1, two slow requests, cap 1 -> saturated for ~2s.
-    let (addr_a, _max_a, server_a) = spawn_counting_server(2, hold).await;
+    // Host A: 127.0.0.1, cap 1. Only the FIRST request is held (3s); the
+    // second answers instantly. The old buggy code stalled dispatch during
+    // the first hold either way, so discrimination is preserved — but the
+    // pass margin for the fixed code grows to ~2.9s, absorbing cold-runner
+    // one-time costs (TLS/cert init, localhost::1 fallback, scheduler
+    // jitter) on slow CI machines without lengthening the test.
+    let hold = std::time::Duration::from_millis(3000);
+    let (addr_a, _max_a, server_a) =
+        spawn_counting_server(vec![hold, std::time::Duration::ZERO]).await;
 
     // Host B: localhost (a distinct host string, same loopback), instant
     // response; records when its request arrives.
@@ -543,8 +607,15 @@ async fn saturated_domain_does_not_stall_dispatch_of_other_domains() {
 
     let crawl_start = std::time::Instant::now();
     let result = engine.crawl().await;
-    server_a.await.unwrap();
-    server_b.await.unwrap();
+    // Timeouts so a missing request fails crisply instead of hanging the job.
+    tokio::time::timeout(std::time::Duration::from_secs(30), server_a)
+        .await
+        .expect("host A must see both requests")
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(30), server_b)
+        .await
+        .expect("host B must see its request")
+        .unwrap();
 
     assert_eq!(result.items.len(), 3, "all three pages fetched");
     let b_at = b_received
