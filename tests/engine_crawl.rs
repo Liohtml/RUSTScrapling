@@ -630,3 +630,199 @@ async fn saturated_domain_does_not_stall_dispatch_of_other_domains() {
         b_at
     );
 }
+
+/// Serve robots.txt and pages over plain HTTP on a local port, so the test
+/// proves robots.txt is fetched from the request's ACTUAL scheme and port.
+/// Handles `count` sequential connections, routing by path.
+async fn spawn_robots_server(
+    robots_body: &'static str,
+    count: usize,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<Vec<String>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let handle = tokio::spawn(async move {
+        let mut paths = Vec::new();
+        for _ in 0..count {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let mut head = Vec::new();
+            loop {
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buf[..n]);
+                if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head_text = String::from_utf8_lossy(&head);
+            let path = head_text
+                .lines()
+                .next()
+                .and_then(|l| l.split_whitespace().nth(1))
+                .unwrap_or("/")
+                .to_string();
+            let (content_type, body) = if path == "/robots.txt" {
+                ("text/plain", robots_body.to_string())
+            } else {
+                ("text/html", format!("<html><body>{}</body></html>", path))
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                content_type,
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+            paths.push(path);
+        }
+        paths
+    });
+
+    (addr, handle)
+}
+
+/// Spider that obeys robots.txt against a live local server.
+struct RobotsSpider {
+    urls: Vec<String>,
+}
+
+#[async_trait]
+impl Spider for RobotsSpider {
+    fn name(&self) -> &str {
+        "robots-spider"
+    }
+    fn start_urls(&self) -> Vec<String> {
+        self.urls.clone()
+    }
+    fn robots_txt_obey(&self) -> bool {
+        true
+    }
+    fn concurrent_requests(&self) -> u32 {
+        1
+    }
+
+    async fn parse(
+        &self,
+        response: SpiderResponse,
+    ) -> (Vec<serde_json::Value>, Vec<SpiderRequest>) {
+        (vec![serde_json::json!({ "url": response.url() })], vec![])
+    }
+}
+
+#[tokio::test]
+async fn robots_txt_fetched_from_actual_scheme_and_port_and_enforced() {
+    // Regression: robots.txt used to be fetched from a hardcoded
+    // https://host/robots.txt — for an HTTP server on a non-default port
+    // that fetch failed silently and EVERYTHING was allowed. Now the fetch
+    // uses the request's real origin, so this server's Disallow must be
+    // honored, including an Allow override and a wildcard pattern.
+    let robots = "User-agent: *\nDisallow: /private\nAllow: /private/ok\nDisallow: /*.pdf$\n";
+    // Expected connections: robots.txt (seed prefetch) + the 2 allowed pages.
+    let (addr, server) = spawn_robots_server(robots, 3).await;
+
+    let urls = vec![
+        format!("http://{}/public", addr),
+        format!("http://{}/private/secret", addr), // disallowed
+        format!("http://{}/private/ok/page", addr), // allowed via Allow override
+        format!("http://{}/report.pdf", addr),     // disallowed by wildcard
+    ];
+    let spider = Arc::new(RobotsSpider { urls });
+    let engine = CrawlerEngine::new(spider, SessionManager::new(FetcherConfig::default()), None)
+        .expect("engine builds");
+
+    let result = engine.crawl().await;
+    let served = tokio::time::timeout(std::time::Duration::from_secs(30), server)
+        .await
+        .expect("server must see robots.txt and the allowed pages")
+        .unwrap();
+
+    assert_eq!(
+        result.stats.robots_disallowed_count, 2,
+        "/private/secret and /report.pdf must be blocked by robots.txt"
+    );
+    assert_eq!(result.items.len(), 2, "only the allowed pages yield items");
+    assert!(served.contains(&"/robots.txt".to_string()));
+    assert!(!served.contains(&"/private/secret".to_string()));
+    assert!(!served.contains(&"/report.pdf".to_string()));
+}
+
+#[tokio::test]
+async fn blocked_responses_are_not_cached_in_dev_mode() {
+    // Regression: the dev cache used to store the response BEFORE the
+    // is_blocked check, so a 403 got cached and every re-enqueued retry was
+    // served the same blocked page from disk — the retry loop was defeated
+    // permanently. Blocked responses must never be cached: all retries go to
+    // the live server, and afterwards the cache must not contain the URL.
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    // 1 initial + 3 retries (default max_blocked_retries) = 4 live hits.
+    let expected_hits = 4usize;
+    let server = tokio::spawn(async move {
+        let mut hits = 0usize;
+        for _ in 0..expected_hits {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let mut head = Vec::new();
+            loop {
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buf[..n]);
+                if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let body = "blocked";
+            let response = format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+            hits += 1;
+        }
+        hits
+    });
+
+    let url = format!("http://{}/always-403", addr);
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().to_str().unwrap().to_string();
+
+    let spider = Arc::new(DelayedCacheSpider {
+        urls: vec![url.clone()],
+        delay: 0.0,
+    });
+    let engine = CrawlerEngine::new(
+        spider,
+        SessionManager::new(FetcherConfig::default()),
+        Some(&base),
+    )
+    .expect("engine builds");
+
+    let result = engine.crawl().await;
+    let hits = tokio::time::timeout(std::time::Duration::from_secs(30), server)
+        .await
+        .expect("every retry must hit the live server, not the cache")
+        .unwrap();
+
+    assert_eq!(hits, expected_hits);
+    assert_eq!(result.stats.blocked_requests_count, expected_hits as u64);
+    assert_eq!(result.items.len(), 0);
+    let cache = ResponseCache::new(&format!("{}/cache", base)).unwrap();
+    assert!(
+        cache.get(&url).await.is_none(),
+        "a blocked response must never be written to the dev cache"
+    );
+}

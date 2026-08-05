@@ -10,6 +10,11 @@ impl SpiderResponse {
         Self { inner }
     }
 
+    /// The underlying fetcher response (full headers, content type, body).
+    pub fn response(&self) -> &FetcherResponse {
+        &self.inner
+    }
+
     pub fn status(&self) -> u16 {
         self.inner.status()
     }
