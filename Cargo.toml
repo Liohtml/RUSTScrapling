@@ -1,6 +1,6 @@
 [package]
 name = "rust_scrapling"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "A Rust port of Scrapling - modern web scraping framework with CSS selectors, async HTTP, and spider-based crawling"
 authors = ["Liohtml"]
