@@ -230,10 +230,18 @@ impl<S: Spider> CrawlerEngine<S> {
                     // dispatch loop, so it actually throttles request *rate*.
                     // (Applying it inside each spawned task only added latency:
                     // N concurrent tasks slept in parallel and then all fired
-                    // at once.)
+                    // at once.) Requests that will be served from the dev
+                    // cache skip the delay — replays hit disk, not the site,
+                    // so there is nothing to be polite to.
                     let delay = self.spider.download_delay();
                     if delay > 0.0 {
-                        tokio::time::sleep(Duration::from_secs_f64(delay)).await;
+                        let served_from_cache = match &self.cache {
+                            Some(c) => c.contains(req.url()).await,
+                            None => false,
+                        };
+                        if !served_from_cache {
+                            tokio::time::sleep(Duration::from_secs_f64(delay)).await;
+                        }
                     }
 
                     let permit = self.global_limiter.clone().acquire_owned().await;
@@ -242,19 +250,23 @@ impl<S: Spider> CrawlerEngine<S> {
                     }
                     let permit = permit.unwrap();
 
-                    // Acquire a per-domain permit when a per-domain cap is
-                    // configured, so a single host cannot exceed it.
+                    // Look up (but do NOT acquire) the per-domain semaphore
+                    // here. The acquisition happens inside the spawned task:
+                    // awaiting it in this single dispatch loop would let one
+                    // saturated domain stall dispatch for every other domain
+                    // (head-of-line blocking), degrading the crawl toward
+                    // serial whenever the priority queue clusters same-domain
+                    // URLs.
                     let per_domain = self.spider.concurrent_requests_per_domain();
-                    let domain_permit = if per_domain > 0 {
+                    let domain_sem = if per_domain > 0 {
                         let domain = req.domain().unwrap_or_default();
-                        let sem = {
-                            let mut limiters = self.domain_limiters.lock().await;
+                        let mut limiters = self.domain_limiters.lock().await;
+                        Some(
                             limiters
                                 .entry(domain)
                                 .or_insert_with(|| Arc::new(Semaphore::new(per_domain as usize)))
-                                .clone()
-                        };
-                        sem.acquire_owned().await.ok()
+                                .clone(),
+                        )
                     } else {
                         None
                     };
@@ -276,7 +288,14 @@ impl<S: Spider> CrawlerEngine<S> {
                         // permits are returned even if `process_request` panics.
                         let _task_guard = ActiveTaskGuard { active_tasks };
                         let _permit = permit;
-                        let _domain_permit = domain_permit;
+                        // Waiting for the domain permit happens here, inside
+                        // the task. This task holds a global permit while it
+                        // waits, but the dispatch loop stays free to spawn
+                        // work for other domains up to the global cap.
+                        let _domain_permit = match domain_sem {
+                            Some(sem) => sem.acquire_owned().await.ok(),
+                            None => None,
+                        };
 
                         Self::process_request(
                             spider,
@@ -369,16 +388,39 @@ impl<S: Spider> CrawlerEngine<S> {
         let mut robots_crawl_delay: Option<f64> = None;
         if let Some(ref robots) = robots_manager {
             let domain = request.domain().unwrap_or_default();
-            let mut robots = robots.lock().await;
-            if !domain.is_empty() && !robots.has_domain(&domain) {
-                robots.fetch_robots(&domain).await;
+            if !domain.is_empty() {
+                // The network fetch runs WITHOUT holding the manager lock:
+                // holding it across the round-trip (up to the 10s robots
+                // timeout) would serialize every other task's is_allowed
+                // check behind this domain's fetch.
+                let (needs_fetch, user_agent) = {
+                    let guard = robots.lock().await;
+                    (!guard.has_domain(&domain), guard.user_agent().to_string())
+                };
+                if needs_fetch {
+                    let rules = RobotsTxtManager::fetch_rules(&user_agent, &domain).await;
+                    let mut guard = robots.lock().await;
+                    // Concurrent tasks may race to fetch the same domain;
+                    // the first insert wins (they fetched the same content).
+                    if !guard.has_domain(&domain) {
+                        guard.insert_rules(&domain, rules);
+                    }
+                }
             }
-            if !robots.is_allowed(&url) {
+            let disallowed = {
+                let guard = robots.lock().await;
+                if guard.is_allowed(&url) {
+                    // Honor the site's Crawl-delay directive for this domain.
+                    robots_crawl_delay = guard.crawl_delay(&domain);
+                    false
+                } else {
+                    true
+                }
+            };
+            if disallowed {
                 stats.lock().await.robots_disallowed_count += 1;
                 return;
             }
-            // Honor the site's Crawl-delay directive for this domain.
-            robots_crawl_delay = robots.crawl_delay(&domain);
         }
 
         // Check allowed_domains. Reject requests whose domain cannot be

@@ -249,3 +249,313 @@ async fn checkpoint_saved_on_pause_includes_seen_fingerprints() {
         "seen set must be persisted, not saved as empty"
     );
 }
+
+// ── Concurrency / throttling behavior ──
+
+/// Spider with a configurable download delay, serving from cache.
+struct DelayedCacheSpider {
+    urls: Vec<String>,
+    delay: f64,
+}
+
+#[async_trait]
+impl Spider for DelayedCacheSpider {
+    fn name(&self) -> &str {
+        "delayed-cache-spider"
+    }
+    fn start_urls(&self) -> Vec<String> {
+        self.urls.clone()
+    }
+    fn download_delay(&self) -> f64 {
+        self.delay
+    }
+    fn development_mode(&self) -> bool {
+        true
+    }
+
+    async fn parse(
+        &self,
+        response: SpiderResponse,
+    ) -> (Vec<serde_json::Value>, Vec<SpiderRequest>) {
+        (vec![serde_json::json!({ "url": response.url() })], vec![])
+    }
+}
+
+#[tokio::test]
+async fn cached_responses_skip_the_download_delay() {
+    // Regression: the dispatch loop used to sleep download_delay for every
+    // request, including ones served from the dev cache — making cached
+    // replays as slow as live crawls for no reason. With 4 cached URLs and a
+    // 1s delay, the old behavior takes >= 4s; the fix should finish almost
+    // instantly.
+    let dir = tempfile::tempdir().unwrap();
+    let urls: Vec<String> = (0..4)
+        .map(|i| format!("https://example.com/fast/{}", i))
+        .collect();
+    seed_cache(dir.path().to_str().unwrap(), &urls).await;
+
+    let spider = Arc::new(DelayedCacheSpider {
+        urls: urls.clone(),
+        delay: 1.0,
+    });
+    let engine = CrawlerEngine::new(
+        spider,
+        SessionManager::new(FetcherConfig::default()),
+        Some(dir.path().to_str().unwrap()),
+    )
+    .expect("engine builds");
+
+    let started = std::time::Instant::now();
+    let result = engine.crawl().await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(result.items.len(), urls.len());
+    assert_eq!(result.stats.cache_hits, urls.len() as u64);
+    assert!(
+        elapsed.as_secs_f64() < 2.0,
+        "cached replay must not sleep the download delay per request; took {:?}",
+        elapsed
+    );
+}
+
+/// Minimal HTTP/1.1 server on a local port that tracks how many requests it
+/// is serving simultaneously, sleeping briefly per request so overlaps would
+/// be observable. Returns (addr, max_concurrency_handle, join_handle).
+async fn spawn_counting_server(
+    expected_requests: usize,
+    hold: std::time::Duration,
+) -> (
+    std::net::SocketAddr,
+    Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let current = Arc::new(AtomicUsize::new(0));
+    let max_seen = Arc::new(AtomicUsize::new(0));
+    let max_out = max_seen.clone();
+
+    let handle = tokio::spawn(async move {
+        for _ in 0..expected_requests {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let current = current.clone();
+            let max_seen = max_seen.clone();
+            tokio::spawn(async move {
+                let now = current.fetch_add(1, Ordering::SeqCst) + 1;
+                max_seen.fetch_max(now, Ordering::SeqCst);
+
+                // Read the request head.
+                let mut buf = [0u8; 4096];
+                let mut head = Vec::new();
+                loop {
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    head.extend_from_slice(&buf[..n]);
+                    if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+
+                // Hold the connection open so concurrent requests overlap
+                // measurably. Decrement BEFORE writing the response: the
+                // client can only issue its next request after receiving
+                // these bytes, so a genuine cap violation still shows up as
+                // overlap during the hold window, while scheduling jitter
+                // after the response can't inflate the counter spuriously.
+                tokio::time::sleep(hold).await;
+                current.fetch_sub(1, Ordering::SeqCst);
+                let body = "<html><body>ok</body></html>";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+
+    (addr, max_out, handle)
+}
+
+/// Spider hitting a live local server with a per-domain concurrency cap.
+struct LiveSpider {
+    urls: Vec<String>,
+    per_domain: u32,
+}
+
+#[async_trait]
+impl Spider for LiveSpider {
+    fn name(&self) -> &str {
+        "live-spider"
+    }
+    fn start_urls(&self) -> Vec<String> {
+        self.urls.clone()
+    }
+    fn concurrent_requests(&self) -> u32 {
+        4
+    }
+    fn concurrent_requests_per_domain(&self) -> u32 {
+        self.per_domain
+    }
+
+    async fn parse(
+        &self,
+        response: SpiderResponse,
+    ) -> (Vec<serde_json::Value>, Vec<SpiderRequest>) {
+        (vec![serde_json::json!({ "url": response.url() })], vec![])
+    }
+}
+
+#[tokio::test]
+async fn per_domain_cap_still_enforced_with_in_task_acquisition() {
+    // The per-domain semaphore moved from the dispatch loop into the spawned
+    // task (to fix head-of-line blocking). This must NOT weaken the cap: with
+    // per_domain=1 and 3 requests to one host, the server must never observe
+    // two requests in flight at once.
+    let hold = std::time::Duration::from_millis(150);
+    let (addr, max_concurrent, server) = spawn_counting_server(3, hold).await;
+
+    let urls: Vec<String> = (0..3)
+        .map(|i| format!("http://{}/page/{}", addr, i))
+        .collect();
+    let spider = Arc::new(LiveSpider {
+        urls: urls.clone(),
+        per_domain: 1,
+    });
+    let engine = CrawlerEngine::new(spider, SessionManager::new(FetcherConfig::default()), None)
+        .expect("engine builds");
+
+    let result = engine.crawl().await;
+    server.await.unwrap();
+
+    assert_eq!(result.items.len(), urls.len(), "all pages fetched");
+    assert_eq!(
+        max_concurrent.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "per-domain cap of 1 must never be exceeded"
+    );
+}
+
+/// Spider over two hosts with explicit priorities: all `high` URLs are
+/// dequeued before the single `low` URL, per_domain = 1.
+struct TwoHostSpider {
+    high: Vec<String>,
+    low: String,
+}
+
+#[async_trait]
+impl Spider for TwoHostSpider {
+    fn name(&self) -> &str {
+        "two-host-spider"
+    }
+    fn start_urls(&self) -> Vec<String> {
+        let mut urls = self.high.clone();
+        urls.push(self.low.clone());
+        urls
+    }
+    fn start_requests(&self) -> Vec<SpiderRequest> {
+        let mut reqs: Vec<SpiderRequest> = self
+            .high
+            .iter()
+            .map(|u| SpiderRequest::builder(u).priority(10).build())
+            .collect();
+        reqs.push(SpiderRequest::builder(&self.low).priority(1).build());
+        reqs
+    }
+    fn concurrent_requests(&self) -> u32 {
+        4
+    }
+    fn concurrent_requests_per_domain(&self) -> u32 {
+        1
+    }
+
+    async fn parse(
+        &self,
+        response: SpiderResponse,
+    ) -> (Vec<serde_json::Value>, Vec<SpiderRequest>) {
+        (vec![serde_json::json!({ "url": response.url() })], vec![])
+    }
+}
+
+#[tokio::test]
+async fn saturated_domain_does_not_stall_dispatch_of_other_domains() {
+    // Regression for head-of-line blocking: the dispatch loop used to AWAIT
+    // the per-domain permit before spawning. With per_domain=1 and two
+    // same-domain requests queued first (higher priority), dispatch of every
+    // other domain stalled until the first domain's request finished. The
+    // permit is now acquired inside the spawned task, so the other domain's
+    // request must go out while the first domain is still busy.
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let hold = std::time::Duration::from_millis(1000);
+    // Host A: 127.0.0.1, two slow requests, cap 1 -> saturated for ~2s.
+    let (addr_a, _max_a, server_a) = spawn_counting_server(2, hold).await;
+
+    // Host B: localhost (a distinct host string, same loopback), instant
+    // response; records when its request arrives.
+    let listener_b = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port_b = listener_b.local_addr().unwrap().port();
+    let b_received: Arc<std::sync::Mutex<Option<std::time::Instant>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let b_received_writer = b_received.clone();
+    let server_b = tokio::spawn(async move {
+        let (mut socket, _) = listener_b.accept().await.unwrap();
+        *b_received_writer.lock().unwrap() = Some(std::time::Instant::now());
+        let mut buf = [0u8; 4096];
+        let mut head = Vec::new();
+        loop {
+            let n = socket.read(&mut buf).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            head.extend_from_slice(&buf[..n]);
+            if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let body = "<html><body>b</body></html>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = socket.write_all(response.as_bytes()).await;
+        let _ = socket.shutdown().await;
+    });
+
+    let spider = Arc::new(TwoHostSpider {
+        high: (0..2)
+            .map(|i| format!("http://{}/slow/{}", addr_a, i))
+            .collect(),
+        low: format!("http://localhost:{}/fast", port_b),
+    });
+    let engine = CrawlerEngine::new(spider, SessionManager::new(FetcherConfig::default()), None)
+        .expect("engine builds");
+
+    let crawl_start = std::time::Instant::now();
+    let result = engine.crawl().await;
+    server_a.await.unwrap();
+    server_b.await.unwrap();
+
+    assert_eq!(result.items.len(), 3, "all three pages fetched");
+    let b_at = b_received
+        .lock()
+        .unwrap()
+        .expect("host B must have been requested")
+        .duration_since(crawl_start);
+    assert!(
+        b_at < hold,
+        "host B must be fetched while host A is still holding its first \
+         request (head-of-line blocking); B was only requested after {:?}",
+        b_at
+    );
+}

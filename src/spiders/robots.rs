@@ -20,6 +20,13 @@ struct RobotsGroup {
     crawl_delay: Option<f64>,
 }
 
+/// Parsed robots.txt rules for one domain, produced by
+/// [`RobotsTxtManager::fetch_rules`] and stored via
+/// [`RobotsTxtManager::insert_rules`]. Opaque on purpose: the split exists so
+/// callers can run the (slow) network fetch WITHOUT borrowing the manager —
+/// i.e. without holding a lock on it — and hand the result back afterwards.
+pub struct FetchedRobots(RobotsRules);
+
 impl RobotsTxtManager {
     pub fn new(user_agent: &str) -> Self {
         Self {
@@ -28,10 +35,16 @@ impl RobotsTxtManager {
         }
     }
 
-    /// Fetch and parse robots.txt for a domain. Uses a purpose-built HTTP
-    /// client with a short timeout so a hanging endpoint cannot block the
-    /// crawl setup indefinitely.
-    pub async fn fetch_robots(&mut self, domain: &str) {
+    /// The user agent string robots.txt groups are matched against.
+    pub fn user_agent(&self) -> &str {
+        &self.user_agent
+    }
+
+    /// Fetch and parse robots.txt for a domain without borrowing a manager.
+    /// Uses a purpose-built HTTP client with a short timeout so a hanging
+    /// endpoint cannot block the caller indefinitely. Unreachable or
+    /// non-2xx robots.txt endpoints yield allow-all rules.
+    pub async fn fetch_rules(user_agent: &str, domain: &str) -> FetchedRobots {
         let url = format!("https://{}/robots.txt", domain);
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
@@ -40,12 +53,26 @@ impl RobotsTxtManager {
 
         let rules = match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => match resp.text().await {
-                Ok(text) => Self::parse_robots(&text, &self.user_agent),
+                Ok(text) => Self::parse_robots(&text, user_agent),
                 Err(_) => RobotsRules::allow_all(),
             },
             _ => RobotsRules::allow_all(),
         };
-        self.cache.insert(domain.to_string(), rules);
+        FetchedRobots(rules)
+    }
+
+    /// Store previously fetched rules for a domain.
+    pub fn insert_rules(&mut self, domain: &str, rules: FetchedRobots) {
+        self.cache.insert(domain.to_string(), rules.0);
+    }
+
+    /// Fetch and store robots.txt for a domain in one step. Prefer the
+    /// [`Self::fetch_rules`] + [`Self::insert_rules`] split when the manager
+    /// lives behind a lock — this method borrows `self` for the whole
+    /// network round-trip.
+    pub async fn fetch_robots(&mut self, domain: &str) {
+        let rules = Self::fetch_rules(&self.user_agent, domain).await;
+        self.insert_rules(domain, rules);
     }
 
     pub fn is_allowed(&self, url: &str) -> bool {
@@ -213,5 +240,37 @@ mod tests {
         let txt = "User-agent: *\nCrawl-delay: 5\n";
         let rules = RobotsTxtManager::parse_robots(txt, "MyBot");
         assert_eq!(rules.crawl_delay, Some(5.0));
+    }
+
+    #[test]
+    fn insert_rules_stores_fetched_rules_under_domain() {
+        // The fetch_rules/insert_rules split exists so the (slow) network
+        // fetch can run without borrowing the manager; verify the two-step
+        // path behaves like the one-step fetch_robots.
+        let mut mgr = RobotsTxtManager::new("MyBot");
+        assert!(!mgr.has_domain("example.com"));
+        assert_eq!(mgr.user_agent(), "MyBot");
+
+        let rules = FetchedRobots(RobotsTxtManager::parse_robots(
+            "User-agent: *\nDisallow: /private\nCrawl-delay: 2\n",
+            "MyBot",
+        ));
+        mgr.insert_rules("example.com", rules);
+
+        assert!(mgr.has_domain("example.com"));
+        assert!(!mgr.is_allowed("https://example.com/private/page"));
+        assert!(mgr.is_allowed("https://example.com/public"));
+        assert_eq!(mgr.crawl_delay("example.com"), Some(2.0));
+    }
+
+    #[tokio::test]
+    async fn fetch_rules_for_unreachable_domain_is_allow_all() {
+        // The .invalid TLD (RFC 2606) can never resolve: fetch_rules must
+        // fall back to allow-all rather than erroring or hanging.
+        let rules = RobotsTxtManager::fetch_rules("MyBot", "unreachable.invalid").await;
+        let mut mgr = RobotsTxtManager::new("MyBot");
+        mgr.insert_rules("unreachable.invalid", rules);
+        assert!(mgr.has_domain("unreachable.invalid"));
+        assert!(mgr.is_allowed("https://unreachable.invalid/anything"));
     }
 }
