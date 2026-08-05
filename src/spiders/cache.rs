@@ -31,6 +31,14 @@ impl ResponseCache {
         serde_json::from_str(&data).ok()
     }
 
+    /// Whether a cached entry exists for this URL, without reading it.
+    /// Used by the engine to skip the download delay for requests that will
+    /// be served from cache anyway (a metadata stat, much cheaper than
+    /// reading and parsing the entry twice).
+    pub async fn contains(&self, url: &str) -> bool {
+        tokio::fs::metadata(self.cache_path(url)).await.is_ok()
+    }
+
     pub async fn put(&self, url: &str, response: &CachedResponse) -> Result<(), std::io::Error> {
         let file_path = self.cache_path(url);
         let cache_dir = self.cache_dir.clone();
