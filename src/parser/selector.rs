@@ -218,6 +218,40 @@ impl Selector {
         Selectors::new(items)
     }
 
+    /// Parsel-style CSS query with `::text` and `::attr(name)` pseudo-element
+    /// support, returning all extracted values:
+    ///
+    /// - `"li::text"` — the full (recursive, whitespace-trimmed) text of
+    ///   each matching element,
+    /// - `"a::attr(href)"` — the attribute value of each matching element
+    ///   that has the attribute (elements without it are skipped),
+    /// - a plain selector — each match's outer HTML.
+    pub fn css_getall(&self, query: &str) -> Vec<TextHandler> {
+        let q = crate::parser::translator::parse_css_query(query);
+        self.css(&q.selector)
+            .into_iter()
+            .filter_map(|el| {
+                if q.extract_text {
+                    // Join text nodes without stripping (so word spacing
+                    // inside markup like "a <b>bold</b> word" survives),
+                    // then trim the ends.
+                    let text = el.get_all_text("", false, &[], None);
+                    Some(TextHandler::from(text.as_str().trim()))
+                } else if let Some(ref attr) = q.extract_attr {
+                    el.get_attribute(attr)
+                } else {
+                    Some(el.outer_html())
+                }
+            })
+            .collect()
+    }
+
+    /// Like [`Self::css_getall`], but returns only the first extracted
+    /// value (Parsel's `.get()`).
+    pub fn css_get(&self, query: &str) -> Option<TextHandler> {
+        self.css_getall(query).into_iter().next()
+    }
+
     /// Return direct element children.
     pub fn children(&self) -> Selectors {
         let node = self.node_ref();
