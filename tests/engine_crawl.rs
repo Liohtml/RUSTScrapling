@@ -928,3 +928,40 @@ async fn autothrottle_backs_off_on_retry_after_before_retrying() {
         gap
     );
 }
+
+#[tokio::test]
+async fn per_domain_and_per_session_stats_are_populated() {
+    // domains_response_bytes and sessions_requests_count were public fields
+    // that nothing ever wrote; the engine now populates them on every live
+    // response.
+    let (addr, _max, server) = spawn_counting_server(vec![std::time::Duration::ZERO; 2]).await;
+    let urls: Vec<String> = (0..2)
+        .map(|i| format!("http://{}/stats/{}", addr, i))
+        .collect();
+    let spider = Arc::new(LiveSpider {
+        urls: urls.clone(),
+        per_domain: 0,
+    });
+    let engine = CrawlerEngine::new(spider, SessionManager::new(FetcherConfig::default()), None)
+        .expect("engine builds");
+
+    let result = engine.crawl().await;
+    tokio::time::timeout(std::time::Duration::from_secs(30), server)
+        .await
+        .expect("server must see both requests")
+        .unwrap();
+
+    assert_eq!(result.items.len(), 2);
+    let bytes = result
+        .stats
+        .domains_response_bytes
+        .get("127.0.0.1")
+        .copied()
+        .unwrap_or(0);
+    assert!(bytes > 0, "per-domain byte count must be populated");
+    assert_eq!(
+        result.stats.sessions_requests_count.get("default").copied(),
+        Some(2),
+        "requests without a session id count under \"default\""
+    );
+}

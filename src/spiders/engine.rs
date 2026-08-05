@@ -590,6 +590,17 @@ impl<S: Spider> CrawlerEngine<S> {
                     s.increment_requests_count();
                     s.increment_status(status);
                     s.increment_response_bytes(content_len);
+                    if !domain.is_empty() {
+                        *s.domains_response_bytes.entry(domain.clone()).or_insert(0) += content_len;
+                    }
+                    let session = if request.session_id().is_empty() {
+                        "default"
+                    } else {
+                        request.session_id()
+                    };
+                    *s.sessions_requests_count
+                        .entry(session.to_string())
+                        .or_insert(0) += 1;
                 }
 
                 let spider_resp = SpiderResponse::new(response);

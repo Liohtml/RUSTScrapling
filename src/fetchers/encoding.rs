@@ -6,8 +6,8 @@
 //! mojibake. Pages that only declare their charset in a `<meta>` tag are
 //! still decoded as lossy UTF-8.
 
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock;
 
 /// Matches the charset parameter of a `Content-Type` header. RFC 7231 allows
 /// the parameter value to be a quoted-string (e.g. `charset="ISO-8859-1"`),
@@ -16,7 +16,7 @@ use regex::Regex;
 /// `;` so `x-charset=...` or a `charset=` inside another parameter's quoted
 /// value (e.g. a multipart boundary) cannot match; whitespace around `=` is
 /// tolerated since misconfigured servers commonly emit it.
-static CHARSET_RE: Lazy<Regex> = Lazy::new(|| {
+static CHARSET_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)(?:^|;)\s*charset\s*=\s*["']?([\w-]+)"#).expect("charset regex is valid")
 });
 
