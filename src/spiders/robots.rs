@@ -317,8 +317,15 @@ fn parse_groups(text: &str) -> Vec<RobotsGroup> {
                 }
                 saw_directive = true;
             } else if let Some(rest) = strip_prefix_ci(line, "crawl-delay:") {
+                // Reject non-finite, negative, and absurd values: f64
+                // parsing accepts "inf"/"NaN"/"1e300", and a hostile
+                // robots.txt must not be able to panic the crawler
+                // (Duration::from_secs_f64 panics on non-finite/oversized
+                // input) or stall it forever. 24h is already unreasonable.
                 if let Ok(d) = rest.trim().parse::<f64>() {
-                    g.crawl_delay = Some(d);
+                    if d.is_finite() && (0.0..=86_400.0).contains(&d) {
+                        g.crawl_delay = Some(d);
+                    }
                 }
                 saw_directive = true;
             }
@@ -387,6 +394,21 @@ mod tests {
         let txt = "User-agent: *\nCrawl-delay: 5\n";
         let rules = RobotsTxtManager::parse_robots(txt, "MyBot");
         assert_eq!(rules.crawl_delay, Some(5.0));
+    }
+
+    #[test]
+    fn hostile_crawl_delay_values_are_rejected() {
+        // f64 parsing accepts "inf"/"NaN"/"1e300"; a hostile robots.txt
+        // must not be able to panic the crawler (Duration::from_secs_f64
+        // panics on non-finite/oversized input) or stall it forever.
+        for bad in ["inf", "-inf", "NaN", "1e300", "-5", "999999999"] {
+            let txt = format!("User-agent: *\nCrawl-delay: {}\n", bad);
+            let rules = RobotsTxtManager::parse_robots(&txt, "MyBot");
+            assert_eq!(rules.crawl_delay, None, "value {:?} must be rejected", bad);
+        }
+        // Sane values still parse.
+        let rules = RobotsTxtManager::parse_robots("User-agent: *\nCrawl-delay: 2.5\n", "MyBot");
+        assert_eq!(rules.crawl_delay, Some(2.5));
     }
 
     #[test]

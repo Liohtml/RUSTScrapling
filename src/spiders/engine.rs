@@ -15,6 +15,7 @@ use crate::spiders::robots::RobotsTxtManager;
 use crate::spiders::scheduler::Scheduler;
 use crate::spiders::session::SessionManager;
 use crate::spiders::spider::Spider;
+use crate::spiders::throttle::{parse_retry_after, AutoThrottle};
 
 /// Sanitize a string for safe use as a single filesystem path segment.
 /// Replaces any character that is not alphanumeric, `_`, or `-` with `_` so
@@ -65,6 +66,10 @@ pub struct CrawlerEngine<S: Spider> {
     robots_manager: Option<Arc<Mutex<RobotsTxtManager>>>,
     cache: Option<Arc<ResponseCache>>,
     checkpoint: Option<Arc<CheckpointManager>>,
+    /// AutoThrottle state when `Spider::autothrottle_enabled()`. A std
+    /// (not tokio) mutex: every critical section is a short, await-free
+    /// computation; the actual sleeping happens after the guard is dropped.
+    throttle: Option<Arc<std::sync::Mutex<AutoThrottle>>>,
     paused: Arc<AtomicBool>,
     active_tasks: Arc<AtomicU32>,
 }
@@ -114,6 +119,16 @@ impl<S: Spider> CrawlerEngine<S> {
             spider.fp_keep_fragments(),
         );
 
+        let throttle = if spider.autothrottle_enabled() {
+            Some(Arc::new(std::sync::Mutex::new(AutoThrottle::new(
+                spider.autothrottle_start_delay(),
+                spider.autothrottle_max_delay(),
+                spider.autothrottle_target_concurrency(),
+            ))))
+        } else {
+            None
+        };
+
         Ok(Self {
             spider,
             session_manager: Arc::new(session_manager),
@@ -125,6 +140,7 @@ impl<S: Spider> CrawlerEngine<S> {
             robots_manager,
             cache,
             checkpoint,
+            throttle,
             paused: Arc::new(AtomicBool::new(false)),
             active_tasks: Arc::new(AtomicU32::new(0)),
         })
@@ -235,9 +251,14 @@ impl<S: Spider> CrawlerEngine<S> {
                     // at once.) Requests that will be served from the dev
                     // cache skip the delay — replays hit disk, not the site,
                     // so there is nothing to be polite to.
+                    // With AutoThrottle enabled the static delay is replaced
+                    // by the adaptive per-domain schedule inside the task
+                    // (download_delay still acts as its floor), so the
+                    // dispatch loop never sleeps for one domain while others
+                    // could be dispatched.
                     let delay = self.spider.download_delay();
                     let mut delay_was_skipped = false;
-                    if delay > 0.0 {
+                    if delay > 0.0 && self.throttle.is_none() {
                         let served_from_cache = match &self.cache {
                             Some(c) => c.contains(req.url()).await,
                             None => false,
@@ -288,6 +309,7 @@ impl<S: Spider> CrawlerEngine<S> {
                     let items = self.items.clone();
                     let robots_manager = self.robots_manager.clone();
                     let cache = self.cache.clone();
+                    let throttle = self.throttle.clone();
                     let active_tasks = self.active_tasks.clone();
 
                     tokio::spawn(async move {
@@ -321,6 +343,7 @@ impl<S: Spider> CrawlerEngine<S> {
                             items,
                             robots_manager,
                             cache,
+                            throttle,
                             req,
                             delay_was_skipped,
                         )
@@ -395,6 +418,7 @@ impl<S: Spider> CrawlerEngine<S> {
         items: Arc<Mutex<ItemList>>,
         robots_manager: Option<Arc<Mutex<RobotsTxtManager>>>,
         cache: Option<Arc<ResponseCache>>,
+        throttle: Option<Arc<std::sync::Mutex<AutoThrottle>>>,
         request: SpiderRequest,
         // True when the dispatch loop skipped the download delay because
         // this URL appeared to be in the dev cache. If the entry then turns
@@ -498,22 +522,67 @@ impl<S: Spider> CrawlerEngine<S> {
             }
         }
 
-        // The spider's static download_delay is applied in the dispatch loop
-        // (so it throttles rate). Here we additionally honor the per-domain
-        // Crawl-delay parsed from this host's robots.txt.
-        if let Some(d) = robots_crawl_delay {
+        let domain = request.domain().unwrap_or_default();
+        // The floor no adaptive schedule may undercut: the spider's static
+        // download_delay and the site's robots.txt Crawl-delay. Defensively
+        // sanitized — Duration::from_secs_f64 panics on non-finite or
+        // oversized input, and part of this comes from remote data (the
+        // robots parser validates too; this guards the spider-provided
+        // side and any future floor source).
+        let delay_floor = spider
+            .download_delay()
+            .max(robots_crawl_delay.unwrap_or(0.0));
+        let delay_floor = if delay_floor.is_finite() {
+            delay_floor.clamp(0.0, 86_400.0)
+        } else {
+            0.0
+        };
+
+        if let Some(ref throttle) = throttle {
+            // AutoThrottle: reserve this domain's next slot (spacing =
+            // current adaptive delay, floored) and wait for it. The guard is
+            // dropped before sleeping.
+            let wait = {
+                let mut t = throttle.lock().unwrap_or_else(|p| p.into_inner());
+                t.reserve(&domain, delay_floor, tokio::time::Instant::now())
+            };
+            if !wait.is_zero() {
+                tokio::time::sleep(wait).await;
+            }
+        } else if let Some(d) = robots_crawl_delay {
+            // Without AutoThrottle the static download_delay is applied in
+            // the dispatch loop (so it throttles rate); here we additionally
+            // honor the per-domain Crawl-delay parsed from robots.txt.
             if d > 0.0 {
                 tokio::time::sleep(Duration::from_secs_f64(d)).await;
             }
         }
 
         // Fetch via session_manager
+        let fetch_started = tokio::time::Instant::now();
         let result = session_manager.fetch(&request).await;
 
         match result {
             Ok(response) => {
                 let status = response.status();
                 let content_len = response.content_length() as u64;
+
+                if let Some(ref throttle) = throttle {
+                    let latency = fetch_started.elapsed().as_secs_f64();
+                    let retry_after = response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| parse_retry_after(v));
+                    let mut t = throttle.lock().unwrap_or_else(|p| p.into_inner());
+                    t.record(
+                        &domain,
+                        latency,
+                        status,
+                        retry_after,
+                        delay_floor,
+                        tokio::time::Instant::now(),
+                    );
+                }
 
                 // Update stats
                 {
