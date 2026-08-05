@@ -392,3 +392,22 @@ fn test_find_by_text_first_and_last_match_agree_on_nested_text() {
         .expect("first_match=false must find a match too");
     assert_eq!(last.tag(), "span");
 }
+
+#[test]
+fn test_css_text_skips_text_less_elements() {
+    // Parity with Parsel and symmetry with ::attr: an element with no text
+    // nodes yields nothing, so css_get returns the first element that has
+    // actual text instead of Some("").
+    let html = r#"<html><body><ul><li></li><li>real</li></ul></body></html>"#;
+    let sel = Selector::from_html(html);
+    let texts: Vec<String> = sel
+        .css_getall("li::text")
+        .into_iter()
+        .map(|t| t.as_str().to_string())
+        .collect();
+    assert_eq!(texts, vec!["real"]);
+    assert_eq!(
+        sel.css_get("li::text").map(|t| t.as_str().to_string()),
+        Some("real".to_string())
+    );
+}

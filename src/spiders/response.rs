@@ -35,13 +35,13 @@ impl SpiderResponse {
         self.selector().css(selector)
     }
 
-    /// Parsel-style CSS query with `::text` / `::attr(name)` support; all
+    /// Parsel-inspired CSS query with `::text` / `::attr(name)` support; all
     /// extracted values. See [`Selector::css_getall`].
     pub fn css_getall(&self, query: &str) -> Vec<crate::core::text_handler::TextHandler> {
         self.selector().css_getall(query)
     }
 
-    /// Parsel-style CSS query with `::text` / `::attr(name)` support; first
+    /// Parsel-inspired CSS query with `::text` / `::attr(name)` support; first
     /// extracted value. See [`Selector::css_get`].
     pub fn css_get(&self, query: &str) -> Option<crate::core::text_handler::TextHandler> {
         self.selector().css_get(query)
