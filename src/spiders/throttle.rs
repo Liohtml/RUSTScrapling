@@ -75,15 +75,19 @@ impl AutoThrottle {
         wait
     }
 
-    /// Record a completed response for `domain` and adapt its delay.
+    /// Record a completed response for `domain` and adapt its delay
+    /// (Scrapy's `_adjust_delay`).
     ///
-    /// - 429/503: the delay doubles, or jumps to `retry_after` when the
-    ///   server sent a larger one, and the domain's clock is pushed out so
-    ///   the very next request already honors the new delay.
-    /// - 2xx: the delay moves halfway toward `latency / target_concurrency`
-    ///   (exponential moving average), in both directions.
-    /// - other statuses: the delay may grow toward the target but never
-    ///   shrinks (a struggling server should not be crawled faster).
+    /// - 429/503: the delay doubles (at least 1s, so a zero start delay
+    ///   still backs off), or jumps to `retry_after` when the server sent a
+    ///   larger one — capped at `max_delay` even if `Retry-After` asks for
+    ///   more — and the domain's clock is pushed out so the very next
+    ///   request already honors the new delay.
+    /// - otherwise the delay moves halfway toward
+    ///   `latency / target_concurrency`, but jumps straight to the target
+    ///   when the target is higher (a suddenly slow server backs off in one
+    ///   response, not several). Only a 200 may shrink the delay: other
+    ///   statuses' latencies are not representative of full-page loads.
     ///
     /// The result is always clamped to `[floor, max_delay]`.
     pub fn record(
@@ -102,12 +106,16 @@ impl AutoThrottle {
         });
 
         let new_delay = if is_throttling_status(status) {
-            let doubled = (slot.delay * 2.0).max(self.start_delay.min(self.max_delay));
+            let min_backoff = self.start_delay.max(1.0).min(self.max_delay);
+            let doubled = (slot.delay * 2.0).max(min_backoff);
             doubled.max(retry_after.unwrap_or(0.0))
         } else {
             let target = latency.max(0.0) / self.target_concurrency;
-            let candidate = (slot.delay + target) / 2.0;
-            if (200..300).contains(&status) {
+            // Halfway toward the target, but never below it: when the
+            // server got slower, back off in a single step (Scrapy's
+            // max(target_delay, new_delay)).
+            let candidate = ((slot.delay + target) / 2.0).max(target);
+            if status == 200 {
                 candidate
             } else {
                 slot.delay.max(candidate)
@@ -261,6 +269,41 @@ mod tests {
         // latency 2s at target concurrency 2 -> target delay 1s -> avg 1.5s.
         at.record("d", 2.0, 200, None, 0.0, now);
         assert!((at.current_delay("d").unwrap() - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sudden_slowdown_backs_off_in_one_step() {
+        // Scrapy's max(target_delay, new_delay): when the measured latency
+        // exceeds the current delay, jump straight to the target instead of
+        // approaching it over several responses.
+        let mut at = AutoThrottle::new(1.0, 60.0, 1.0);
+        let now = t0();
+        at.reserve("d", 0.0, now);
+        at.record("d", 10.0, 200, None, 0.0, now);
+        assert!((at.current_delay("d").unwrap() - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn non_200_success_does_not_shrink_the_delay() {
+        // Scrapy only shrinks on exactly 200: a 204's latency is not
+        // representative of a full page load.
+        let mut at = AutoThrottle::new(4.0, 60.0, 1.0);
+        let now = t0();
+        at.reserve("d", 0.0, now);
+        at.record("d", 0.01, 204, None, 0.0, now);
+        assert!((at.current_delay("d").unwrap() - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zero_start_delay_still_backs_off_on_429() {
+        // Doubling from zero sticks at zero; the throttling branch enforces
+        // a minimum 1s back-off so a 429 without Retry-After still slows
+        // the crawl down.
+        let mut at = AutoThrottle::new(0.0, 60.0, 1.0);
+        let now = t0();
+        at.reserve("d", 0.0, now);
+        at.record("d", 0.05, 429, None, 0.0, now);
+        assert!(at.current_delay("d").unwrap() >= 1.0);
     }
 
     #[test]

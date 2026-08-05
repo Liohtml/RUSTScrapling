@@ -524,10 +524,19 @@ impl<S: Spider> CrawlerEngine<S> {
 
         let domain = request.domain().unwrap_or_default();
         // The floor no adaptive schedule may undercut: the spider's static
-        // download_delay and the site's robots.txt Crawl-delay.
+        // download_delay and the site's robots.txt Crawl-delay. Defensively
+        // sanitized — Duration::from_secs_f64 panics on non-finite or
+        // oversized input, and part of this comes from remote data (the
+        // robots parser validates too; this guards the spider-provided
+        // side and any future floor source).
         let delay_floor = spider
             .download_delay()
             .max(robots_crawl_delay.unwrap_or(0.0));
+        let delay_floor = if delay_floor.is_finite() {
+            delay_floor.clamp(0.0, 86_400.0)
+        } else {
+            0.0
+        };
 
         if let Some(ref throttle) = throttle {
             // AutoThrottle: reserve this domain's next slot (spacing =
