@@ -35,7 +35,13 @@ pub type ProcessFn = Arc<dyn Fn(String) -> Option<String> + Send + Sync>;
 /// All matching is regex-based. Domain filters match the exact host or any
 /// subdomain (`example.com` matches `api.example.com`). `deny` takes
 /// precedence over `allow`.
+///
+/// Configure it with the chained builder-style methods
+/// ([`LinkExtractor::allow`], [`LinkExtractor::deny_domains`], …), then
+/// call [`LinkExtractor::extract`] on responses (or
+/// [`LinkExtractor::matches`] on single URLs).
 #[derive(Clone)]
+#[must_use = "a LinkExtractor does nothing until `.extract()` or `.matches()` is called"]
 pub struct LinkExtractor {
     allow: Vec<Regex>,
     deny: Vec<Regex>,
@@ -94,6 +100,10 @@ impl std::fmt::Debug for LinkExtractor {
 }
 
 impl LinkExtractor {
+    /// Create an extractor with the default configuration: `a`/`area`
+    /// tags' `href` attributes, canonicalization and whitespace-stripping
+    /// on, and the standard extension deny list
+    /// ([`IGNORED_EXTENSIONS`]).
     pub fn new() -> Self {
         Self::default()
     }
@@ -217,6 +227,13 @@ impl LinkExtractor {
 
     /// Return absolute, filtered, deduped URLs from `response`, preserving
     /// document order.
+    ///
+    /// Pipeline per candidate: read the configured attributes off the
+    /// configured tags (within `restrict_css` scopes if any), strip
+    /// whitespace, absolutize against the response URL, run the `process`
+    /// hook, canonicalize, then apply the scheme / extension / allow /
+    /// deny / domain filters and dedup.
+    #[must_use]
     pub fn extract(&self, response: &SpiderResponse) -> Vec<String> {
         let root = response.selector();
         let scopes = if self.restrict_css.is_empty() {
@@ -288,6 +305,7 @@ impl LinkExtractor {
     /// allow/deny/domain/extension rules to a single URL. Used by
     /// `SitemapSpider` to dispatch sitemap URLs through `CrawlRule`s without
     /// needing a response.
+    #[must_use]
     pub fn matches(&self, url: &str) -> bool {
         let url = if self.canonicalize {
             canonicalize_url(url, self.keep_fragment)
@@ -371,6 +389,7 @@ fn extension_chains(url: &str) -> Vec<String> {
 /// bytes that are not valid UTF-8 (e.g. `%FF`) survive canonicalization
 /// instead of being mangled through a decode/re-encode round trip. An empty
 /// query (`/p?`) is normalized away so it dedupes with `/p`.
+#[must_use]
 pub fn canonicalize_url(url: &str, keep_fragment: bool) -> String {
     let Ok(mut parsed) = Url::parse(url) else {
         return url.to_string();

@@ -1,8 +1,16 @@
+//! Generate CSS or XPath expressions that uniquely address an element, for
+//! logging, debugging, or re-selecting an element found by other means
+//! (e.g. [`Selector::find_by_text`](crate::parser::Selector::find_by_text)).
+
 use crate::parser::selector::Selector;
 
-/// Generate a CSS selector for the given element.
-/// If `full_path` is false, stops at nearest ancestor with an `id`.
-/// If `full_path` is true, generates complete path from root.
+/// Generate a CSS selector addressing the given element.
+///
+/// Path segments use `:nth-of-type(n)` whenever an element shares its tag
+/// with siblings. If `full_path` is `false`, the path stops at the nearest
+/// ancestor with an `id` attribute (emitted as `#id`); if `true`, the
+/// complete `>`-joined path from the root is generated.
+#[must_use]
 pub fn generate_css_selector(selector: &Selector, full_path: bool) -> String {
     let mut parts: Vec<String> = Vec::new();
     let mut current = Some(selector.clone());
@@ -34,7 +42,14 @@ pub fn generate_css_selector(selector: &Selector, full_path: bool) -> String {
     parts.join(" > ")
 }
 
-/// Generate an XPath selector for the given element.
+/// Generate an XPath expression addressing the given element.
+///
+/// Positional predicates (`tag[n]`) are added whenever an element shares
+/// its tag with siblings. If `full_path` is `false`, the path stops at the
+/// nearest ancestor with an `id` attribute (emitted as `tag[@id='…']`,
+/// with quoting that is safe for ids containing quotes); if `true`, the
+/// complete path from the root is generated.
+#[must_use]
 pub fn generate_xpath_selector(selector: &Selector, full_path: bool) -> String {
     let mut parts: Vec<String> = Vec::new();
     let mut current = Some(selector.clone());

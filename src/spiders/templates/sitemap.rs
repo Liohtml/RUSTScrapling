@@ -27,7 +27,10 @@ use url::Url;
 /// which is fetched recursively).
 #[derive(Debug, Default, PartialEq)]
 pub struct SitemapResult {
+    /// Page URLs from a `<urlset>` document's `<loc>` entries (plus
+    /// alternate-language links when enabled).
     pub urls: Vec<String>,
+    /// Child sitemap URLs from a `<sitemapindex>` document.
     pub sitemaps: Vec<String>,
 }
 
@@ -56,6 +59,7 @@ pub struct SitemapSpider {
 }
 
 impl SitemapSpider {
+    /// Start building a `SitemapSpider` with the given spider name.
     pub fn builder(name: &str) -> SitemapSpiderBuilder {
         SitemapSpiderBuilder::new(name)
     }
@@ -268,6 +272,8 @@ impl Spider for SitemapSpider {
     }
 }
 
+/// Builder for [`SitemapSpider`], created via [`SitemapSpider::builder`].
+#[must_use = "builders do nothing until `.build()` is called"]
 pub struct SitemapSpiderBuilder {
     spider: SitemapSpider,
 }
@@ -302,11 +308,14 @@ impl SitemapSpiderBuilder {
         self
     }
 
+    /// Add one rule for dispatching page URLs found in sitemaps (first
+    /// matching rule wins).
     pub fn rule(mut self, rule: CrawlRule) -> Self {
         self.spider.rules.push(rule);
         self
     }
 
+    /// Add several dispatch rules at once.
     pub fn rules<I>(mut self, rules: I) -> Self
     where
         I: IntoIterator<Item = CrawlRule>,
@@ -333,6 +342,8 @@ impl SitemapSpiderBuilder {
         self
     }
 
+    /// Restrict the crawl to these hosts (see
+    /// [`Spider::allowed_domains`]).
     pub fn allowed_domains<I, S>(mut self, domains: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -344,21 +355,28 @@ impl SitemapSpiderBuilder {
         self
     }
 
+    /// Set the global concurrency limit (default 4).
     pub fn concurrent_requests(mut self, n: u32) -> Self {
         self.spider.concurrent_requests = n;
         self
     }
 
+    /// Enable development mode (cache responses on disk and replay them —
+    /// see [`Spider::development_mode`]).
     pub fn development_mode(mut self, on: bool) -> Self {
         self.spider.development_mode = on;
         self
     }
 
+    /// Fetch and obey each origin's robots.txt (see
+    /// [`Spider::robots_txt_obey`]).
     pub fn robots_txt_obey(mut self, on: bool) -> Self {
         self.spider.robots_txt_obey = on;
         self
     }
 
+    /// Finish the builder and return the configured [`SitemapSpider`].
+    #[must_use]
     pub fn build(self) -> SitemapSpider {
         self.spider
     }

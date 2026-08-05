@@ -326,6 +326,8 @@ impl Spider for ShopifySpider {
     }
 }
 
+/// Builder for [`ShopifySpider`], created via [`ShopifySpider::builder`].
+#[must_use = "builders do nothing until `.build()` is called"]
 pub struct ShopifySpiderBuilder {
     spider: ShopifySpider,
 }
@@ -347,11 +349,15 @@ impl ShopifySpiderBuilder {
         }
     }
 
+    /// Set the spider name (default `"shopify"`); also names the dev
+    /// cache / checkpoint directory.
     pub fn name(mut self, name: &str) -> Self {
         self.spider.name = name.to_string();
         self
     }
 
+    /// Restrict the crawl to these hosts (see
+    /// [`Spider::allowed_domains`]).
     pub fn allowed_domains<I, S>(mut self, domains: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -363,26 +369,35 @@ impl ShopifySpiderBuilder {
         self
     }
 
+    /// Set the global concurrency limit (default 4).
     pub fn concurrent_requests(mut self, n: u32) -> Self {
         self.spider.concurrent_requests = n;
         self
     }
 
+    /// Politeness delay in seconds between requests (default 0; Shopify
+    /// endpoints rate-limit aggressively, so a small delay is often wise).
     pub fn download_delay(mut self, secs: f64) -> Self {
         self.spider.download_delay = secs;
         self
     }
 
+    /// Enable development mode (cache responses on disk and replay them —
+    /// see [`Spider::development_mode`]).
     pub fn development_mode(mut self, on: bool) -> Self {
         self.spider.development_mode = on;
         self
     }
 
+    /// Fetch and obey the store's robots.txt (see
+    /// [`Spider::robots_txt_obey`]).
     pub fn robots_txt_obey(mut self, on: bool) -> Self {
         self.spider.robots_txt_obey = on;
         self
     }
 
+    /// Finish the builder and return the configured [`ShopifySpider`].
+    #[must_use]
     pub fn build(self) -> ShopifySpider {
         self.spider
     }

@@ -29,6 +29,12 @@ struct Slot {
     next_allowed: Instant,
 }
 
+/// Per-domain adaptive delay state (see the [module docs](self)).
+///
+/// The engine drives it with two calls per request:
+/// [`AutoThrottle::reserve`] before sending (returns how long to wait) and
+/// [`AutoThrottle::record`] when the response arrives (adapts the delay to
+/// the measured latency and status).
 pub struct AutoThrottle {
     start_delay: f64,
     max_delay: f64,
@@ -134,8 +140,10 @@ impl AutoThrottle {
         }
     }
 
-    /// The current adaptive delay for a domain, if any request to it has
-    /// been reserved or recorded yet. Mainly for introspection and tests.
+    /// The current adaptive delay (seconds) for a domain, if any request
+    /// to it has been reserved or recorded yet. Mainly for introspection
+    /// and tests.
+    #[must_use]
     pub fn current_delay(&self, domain: &str) -> Option<f64> {
         self.slots.get(domain).map(|s| s.delay)
     }
@@ -144,6 +152,7 @@ impl AutoThrottle {
 /// Parse an HTTP `Retry-After` header value: only the delta-seconds form is
 /// supported (the HTTP-date form is rare on rate-limit responses and would
 /// need a date parser); returns `None` for dates or garbage.
+#[must_use]
 pub fn parse_retry_after(value: &str) -> Option<f64> {
     let v = value.trim();
     let secs: f64 = v.parse().ok()?;

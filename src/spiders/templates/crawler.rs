@@ -26,7 +26,9 @@ pub type ParseItemFn = Arc<dyn Fn(&SpiderResponse) -> Vec<serde_json::Value> + S
 
 /// Rule for [`CrawlSpider`]: extract links from a response and dispatch them.
 #[derive(Clone)]
+#[must_use = "a CrawlRule does nothing until added to a spider via `.rule()`/`.rules()`"]
 pub struct CrawlRule {
+    /// Selects and filters which links this rule follows.
     pub link_extractor: LinkExtractor,
     /// Override the priority of the requests that will be dispatched.
     pub priority: Option<i32>,
@@ -45,6 +47,8 @@ impl std::fmt::Debug for CrawlRule {
 }
 
 impl CrawlRule {
+    /// Create a rule following the links selected by `link_extractor`,
+    /// with no priority override and no request hook.
     pub fn new(link_extractor: LinkExtractor) -> Self {
         Self {
             link_extractor,
@@ -53,11 +57,15 @@ impl CrawlRule {
         }
     }
 
+    /// Dispatch this rule's requests with the given scheduling priority
+    /// (higher is crawled first).
     pub fn priority(mut self, priority: i32) -> Self {
         self.priority = Some(priority);
         self
     }
 
+    /// Set a hook that can mutate each built request (add headers, meta,
+    /// a session) or drop it by returning `None`.
     pub fn process_request(mut self, f: ProcessRequestFn) -> Self {
         self.process_request = Some(f);
         self
@@ -110,10 +118,12 @@ pub struct CrawlSpider {
 }
 
 impl CrawlSpider {
+    /// Start building a `CrawlSpider` with the given spider name.
     pub fn builder(name: &str) -> CrawlSpiderBuilder {
         CrawlSpiderBuilder::new(name)
     }
 
+    /// The configured crawl rules.
     pub fn rules(&self) -> &[CrawlRule] {
         &self.rules
     }
@@ -159,6 +169,8 @@ impl Spider for CrawlSpider {
     }
 }
 
+/// Builder for [`CrawlSpider`], created via [`CrawlSpider::builder`].
+#[must_use = "builders do nothing until `.build()` is called"]
 pub struct CrawlSpiderBuilder {
     spider: CrawlSpider,
 }
@@ -179,6 +191,7 @@ impl CrawlSpiderBuilder {
         }
     }
 
+    /// Add seed URLs the crawl starts from.
     pub fn start_urls<I, S>(mut self, urls: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -190,11 +203,13 @@ impl CrawlSpiderBuilder {
         self
     }
 
+    /// Add one crawl rule (all rules run against every fetched page).
     pub fn rule(mut self, rule: CrawlRule) -> Self {
         self.spider.rules.push(rule);
         self
     }
 
+    /// Add several crawl rules at once.
     pub fn rules<I>(mut self, rules: I) -> Self
     where
         I: IntoIterator<Item = CrawlRule>,
@@ -209,6 +224,8 @@ impl CrawlSpiderBuilder {
         self
     }
 
+    /// Restrict the crawl to these hosts (see
+    /// [`Spider::allowed_domains`]).
     pub fn allowed_domains<I, S>(mut self, domains: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -220,21 +237,28 @@ impl CrawlSpiderBuilder {
         self
     }
 
+    /// Set the global concurrency limit (default 4).
     pub fn concurrent_requests(mut self, n: u32) -> Self {
         self.spider.concurrent_requests = n;
         self
     }
 
+    /// Enable development mode (cache responses on disk and replay them —
+    /// see [`Spider::development_mode`]).
     pub fn development_mode(mut self, on: bool) -> Self {
         self.spider.development_mode = on;
         self
     }
 
+    /// Fetch and obey each origin's robots.txt (see
+    /// [`Spider::robots_txt_obey`]).
     pub fn robots_txt_obey(mut self, on: bool) -> Self {
         self.spider.robots_txt_obey = on;
         self
     }
 
+    /// Finish the builder and return the configured [`CrawlSpider`].
+    #[must_use]
     pub fn build(self) -> CrawlSpider {
         self.spider
     }

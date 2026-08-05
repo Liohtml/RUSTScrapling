@@ -24,6 +24,7 @@ static CHARSET_RE: LazyLock<Regex> = LazyLock::new(|| {
 ///
 /// Handles both bare (`charset=utf-8`) and quoted (`charset="ISO-8859-1"`)
 /// parameter forms; the quotes are not part of the returned label.
+#[must_use]
 pub fn charset_from_content_type(content_type: &str) -> Option<&str> {
     CHARSET_RE
         .captures(content_type)
@@ -41,6 +42,7 @@ pub fn charset_from_content_type(content_type: &str) -> Option<&str> {
 /// legacy labels (`hz-gb-2312`, `iso-2022-kr`, …) to the *replacement*
 /// encoding, which decodes the entire body to a single U+FFFD — for a
 /// scraper, falling back to lossy UTF-8 preserves far more of the content.
+#[must_use]
 pub fn decode_body(bytes: &[u8], content_type: &str) -> String {
     let encoding = charset_from_content_type(content_type)
         .and_then(|label| encoding_rs::Encoding::for_label_no_replacement(label.as_bytes()))

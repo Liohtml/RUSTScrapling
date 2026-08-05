@@ -1,3 +1,7 @@
+//! The [`SessionManager`]: named [`Fetcher`] instances (each with its own
+//! config, cookies, and proxies) that spider requests are routed through
+//! via their `session_id`.
+
 use crate::fetchers::client::{Fetcher, FetcherError};
 use crate::fetchers::config::FetcherConfig;
 use crate::fetchers::response::Response;
@@ -9,20 +13,32 @@ use std::collections::HashMap;
 /// from a transient network failure (worth retrying).
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
+    /// The request named a session that was never added.
     #[error("session '{0}' not found")]
     NotFound(String),
+    /// The request's HTTP method is not one of GET/POST/PUT/DELETE.
     #[error("unsupported HTTP method: {0}")]
     UnsupportedMethod(String),
+    /// The fetch itself failed (after the fetcher's own retries).
     #[error("network error: {0}")]
     Network(String),
 }
 
+/// A registry of named [`Fetcher`] sessions.
+///
+/// The [`CrawlerEngine`](crate::spiders::engine::CrawlerEngine) fetches
+/// each [`SpiderRequest`] through the session named by its `session_id`
+/// (or `"default"`, created lazily from the default config). Multiple
+/// sessions let one crawl use different configurations — e.g. distinct
+/// proxies, headers, or cookie jars — for different requests.
 pub struct SessionManager {
     sessions: HashMap<String, Fetcher>,
     default_config: FetcherConfig,
 }
 
 impl SessionManager {
+    /// Create a manager with no sessions yet; `default_config` is used to
+    /// build the `"default"` session on demand.
     pub fn new(default_config: FetcherConfig) -> Self {
         Self {
             sessions: HashMap::new(),

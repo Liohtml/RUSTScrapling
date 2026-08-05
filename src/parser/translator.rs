@@ -1,10 +1,21 @@
-/// Parse CSS selector with ::text and ::attr() pseudo-element support.
+//! Splits Parsel-style CSS queries (`h1::text`, `a::attr(href)`) into the
+//! plain CSS selector and the extraction the pseudo-element asks for.
+
+/// A CSS query decomposed into its selector part and the extraction mode
+/// requested by a trailing `::text` or `::attr(name)` pseudo-element.
 pub struct CssQuery {
+    /// The plain CSS selector with any trailing pseudo-element removed.
     pub selector: String,
+    /// `true` when the query ended in `::text` (extract recursive text).
     pub extract_text: bool,
+    /// The attribute name when the query ended in `::attr(name)`.
     pub extract_attr: Option<String>,
 }
 
+/// Parse a CSS query, splitting off a trailing `::text` or `::attr(name)`
+/// pseudo-element. Queries without either pseudo-element come back with the
+/// (trimmed) selector unchanged and both extraction fields unset.
+#[must_use]
 pub fn parse_css_query(selector: &str) -> CssQuery {
     let trimmed = selector.trim();
 
