@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
-use url::Url;
 
 use crate::fetchers::client::FetcherError;
 use crate::fetchers::response::Response as FetcherResponse;
@@ -188,22 +187,20 @@ impl<S: Spider> CrawlerEngine<S> {
         // Call spider.on_start
         self.spider.on_start(resuming).await;
 
-        // Pre-fetch robots.txt for seed domains
+        // Pre-fetch robots.txt for seed origins (actual scheme + port, same
+        // as the lazy path in process_request).
         if let Some(ref robots) = self.robots_manager {
             let start_urls = self.spider.start_urls();
-            let mut domains_seen = std::collections::HashSet::new();
+            let mut origins_seen = std::collections::HashSet::new();
             for url in &start_urls {
-                if let Some(domain) = Url::parse(url)
-                    .ok()
-                    .and_then(|u| u.host_str().map(|h| h.to_string()))
-                {
-                    if domains_seen.insert(domain.clone()) {
+                if let Some((origin, key)) = RobotsTxtManager::origin_and_key(url) {
+                    if origins_seen.insert(key.clone()) {
                         // Same lock discipline as the lazy path in
                         // process_request: fetch without holding the manager
                         // lock (uncontended here, but consistent).
                         let user_agent = robots.lock().await.user_agent().to_string();
-                        let rules = RobotsTxtManager::fetch_rules(&user_agent, &domain).await;
-                        robots.lock().await.insert_rules(&domain, rules);
+                        let rules = RobotsTxtManager::fetch_rules(&user_agent, &origin).await;
+                        robots.lock().await.insert_rules(&key, rules);
                     }
                 }
             }
@@ -412,39 +409,42 @@ impl<S: Spider> CrawlerEngine<S> {
         // link to a new host would bypass the Robots Exclusion Protocol.
         let mut robots_crawl_delay: Option<f64> = None;
         if let Some(ref robots) = robots_manager {
-            let domain = request.domain().unwrap_or_default();
-            if !domain.is_empty() {
+            // Fetch robots.txt from the request's actual origin (scheme +
+            // host + explicit port), not a hardcoded https://host/ — an
+            // HTTP-only site or a non-default port would otherwise silently
+            // become allow-all. URLs without a host skip robots handling.
+            if let Some((origin, key)) = RobotsTxtManager::origin_and_key(&url) {
                 // The network fetch runs WITHOUT holding the manager lock:
                 // holding it across the round-trip (up to the 10s robots
                 // timeout) would serialize every other task's is_allowed
-                // check behind this domain's fetch.
+                // check behind this origin's fetch.
                 let (needs_fetch, user_agent) = {
                     let guard = robots.lock().await;
-                    (!guard.has_domain(&domain), guard.user_agent().to_string())
+                    (!guard.has_domain(&key), guard.user_agent().to_string())
                 };
                 if needs_fetch {
-                    let rules = RobotsTxtManager::fetch_rules(&user_agent, &domain).await;
+                    let rules = RobotsTxtManager::fetch_rules(&user_agent, &origin).await;
                     let mut guard = robots.lock().await;
-                    // Concurrent tasks may race to fetch the same domain;
+                    // Concurrent tasks may race to fetch the same origin;
                     // the first insert wins (they fetched the same content).
-                    if !guard.has_domain(&domain) {
-                        guard.insert_rules(&domain, rules);
+                    if !guard.has_domain(&key) {
+                        guard.insert_rules(&key, rules);
                     }
                 }
-            }
-            let disallowed = {
-                let guard = robots.lock().await;
-                if guard.is_allowed(&url) {
-                    // Honor the site's Crawl-delay directive for this domain.
-                    robots_crawl_delay = guard.crawl_delay(&domain);
-                    false
-                } else {
-                    true
+                let disallowed = {
+                    let guard = robots.lock().await;
+                    if guard.is_allowed(&url) {
+                        // Honor the site's Crawl-delay directive.
+                        robots_crawl_delay = guard.crawl_delay(&key);
+                        false
+                    } else {
+                        true
+                    }
+                };
+                if disallowed {
+                    stats.lock().await.robots_disallowed_count += 1;
+                    return;
                 }
-            };
-            if disallowed {
-                stats.lock().await.robots_disallowed_count += 1;
-                return;
             }
         }
 
@@ -523,24 +523,16 @@ impl<S: Spider> CrawlerEngine<S> {
                     s.increment_response_bytes(content_len);
                 }
 
-                // Store to cache if dev mode
-                if let Some(ref response_cache) = cache {
-                    let cached = CachedResponse {
-                        status: response.status(),
-                        content_type: response.content_type().to_string(),
-                        body: response.text().to_string(),
-                        url: response.url().to_string(),
-                        headers: response.headers().clone(),
-                    };
-                    let _ = response_cache.put(&url, &cached).await;
-                }
-
                 let spider_resp = SpiderResponse::new(response);
 
-                // Check if blocked
+                // Check if blocked — BEFORE the dev-cache write. Caching a
+                // blocked response would serve the same blocked page back to
+                // the re-enqueued retry from disk, defeating the retry loop
+                // entirely (and permanently, until the cache is cleared).
                 if spider.is_blocked(&spider_resp).await {
                     let mut s = stats.lock().await;
                     s.blocked_requests_count += 1;
+                    drop(s);
 
                     if request.retry_count() < spider.max_blocked_retries() {
                         let mut retry_req = request.copy();
@@ -549,6 +541,19 @@ impl<S: Spider> CrawlerEngine<S> {
                         scheduler.lock().await.enqueue(retry_req);
                     }
                     return;
+                }
+
+                // Store to cache if dev mode (only non-blocked responses).
+                if let Some(ref response_cache) = cache {
+                    let response = spider_resp.response();
+                    let cached = CachedResponse {
+                        status: response.status(),
+                        content_type: response.content_type().to_string(),
+                        body: response.text().to_string(),
+                        url: response.url().to_string(),
+                        headers: response.headers().clone(),
+                    };
+                    let _ = response_cache.put(&url, &cached).await;
                 }
 
                 // Parse response

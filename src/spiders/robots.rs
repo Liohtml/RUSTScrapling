@@ -7,8 +7,12 @@ pub struct RobotsTxtManager {
     user_agent: String,
 }
 
+/// Parsed rules for one origin. `rules` holds (allow, pattern) pairs from
+/// `Allow:`/`Disallow:` lines; evaluation is longest-match-wins with Allow
+/// winning ties (Google's published robots.txt algorithm, which RFC 9309
+/// follows).
 struct RobotsRules {
-    disallowed: Vec<String>,
+    rules: Vec<(bool, String)>,
     crawl_delay: Option<f64>,
 }
 
@@ -16,7 +20,7 @@ struct RobotsRules {
 /// applicable agents followed by their directives.
 struct RobotsGroup {
     agents: Vec<String>,
-    disallow: Vec<String>,
+    rules: Vec<(bool, String)>,
     crawl_delay: Option<f64>,
 }
 
@@ -40,12 +44,37 @@ impl RobotsTxtManager {
         &self.user_agent
     }
 
-    /// Fetch and parse robots.txt for a domain without borrowing a manager.
-    /// Uses a purpose-built HTTP client with a short timeout so a hanging
-    /// endpoint cannot block the caller indefinitely. Unreachable or
-    /// non-2xx robots.txt endpoints yield allow-all rules.
-    pub async fn fetch_rules(user_agent: &str, domain: &str) -> FetchedRobots {
-        let url = format!("https://{}/robots.txt", domain);
+    /// Derive the robots.txt origin and cache key for a request URL.
+    /// The origin preserves the URL's actual scheme and any explicit port
+    /// (`http://shop.example:8080`), so robots.txt is fetched from where the
+    /// site actually lives instead of a hardcoded `https://host/`. The key
+    /// is `host` or `host:port` (port omitted when it is the scheme
+    /// default). Returns `None` for URLs without a host (data:, mailto:,
+    /// malformed), which skip robots handling entirely.
+    pub fn origin_and_key(url: &str) -> Option<(String, String)> {
+        let u = Url::parse(url).ok()?;
+        let host = u.host_str()?.to_string();
+        match u.port() {
+            Some(port) => Some((
+                format!("{}://{}:{}", u.scheme(), host, port),
+                format!("{}:{}", host, port),
+            )),
+            None => Some((format!("{}://{}", u.scheme(), host), host)),
+        }
+    }
+
+    /// Fetch and parse robots.txt for an origin without borrowing a manager.
+    /// `origin` is either a full origin (`http://host:8080`) or a bare host,
+    /// in which case `https://` is assumed. Uses a purpose-built HTTP client
+    /// with a short timeout so a hanging endpoint cannot block the caller
+    /// indefinitely. Unreachable or non-2xx robots.txt endpoints yield
+    /// allow-all rules.
+    pub async fn fetch_rules(user_agent: &str, origin: &str) -> FetchedRobots {
+        let url = if origin.contains("://") {
+            format!("{}/robots.txt", origin)
+        } else {
+            format!("https://{}/robots.txt", origin)
+        };
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
@@ -61,74 +90,82 @@ impl RobotsTxtManager {
         FetchedRobots(rules)
     }
 
-    /// Store previously fetched rules for a domain.
-    pub fn insert_rules(&mut self, domain: &str, rules: FetchedRobots) {
-        self.cache.insert(domain.to_string(), rules.0);
+    /// Store previously fetched rules under a cache key (see
+    /// [`Self::origin_and_key`]).
+    pub fn insert_rules(&mut self, key: &str, rules: FetchedRobots) {
+        self.cache.insert(key.to_string(), rules.0);
     }
 
-    /// Fetch and store robots.txt for a domain in one step. Prefer the
-    /// [`Self::fetch_rules`] + [`Self::insert_rules`] split when the manager
-    /// lives behind a lock — this method borrows `self` for the whole
-    /// network round-trip.
+    /// Fetch and store robots.txt for a bare domain (https assumed) in one
+    /// step. Prefer the [`Self::fetch_rules`] + [`Self::insert_rules`] split
+    /// when the manager lives behind a lock — this method borrows `self` for
+    /// the whole network round-trip.
     pub async fn fetch_robots(&mut self, domain: &str) {
         let rules = Self::fetch_rules(&self.user_agent, domain).await;
         self.insert_rules(domain, rules);
     }
 
+    /// Whether `url` is allowed by the stored rules for its origin. Origins
+    /// without stored rules are allowed (robots.txt not fetched or absent).
+    /// Matching runs against the URL's path plus query string, per the
+    /// robots.txt matching rules.
     pub fn is_allowed(&self, url: &str) -> bool {
-        let domain = match Url::parse(url)
-            .ok()
-            .and_then(|u| u.host_str().map(|h| h.to_string()))
-        {
-            Some(d) => d,
+        let key = match Self::origin_and_key(url) {
+            Some((_, key)) => key,
             None => return true,
         };
+        let parsed = match Url::parse(url) {
+            Ok(u) => u,
+            Err(_) => return true,
+        };
+        let mut target = parsed.path().to_string();
+        if let Some(q) = parsed.query() {
+            target.push('?');
+            target.push_str(q);
+        }
 
-        let path = Url::parse(url)
-            .map(|u| u.path().to_string())
-            .unwrap_or_else(|_| "/".to_string());
-
-        match self.cache.get(&domain) {
-            Some(rules) => {
-                for disallowed in &rules.disallowed {
-                    if disallowed.is_empty() {
-                        continue;
-                    }
-                    if path.starts_with(disallowed) {
-                        return false;
-                    }
-                }
-                true
-            }
+        match self.cache.get(&key) {
+            Some(rules) => rules.is_path_allowed(&target),
             None => true,
         }
     }
 
-    pub fn crawl_delay(&self, domain: &str) -> Option<f64> {
-        self.cache.get(domain).and_then(|r| r.crawl_delay)
+    /// Crawl-delay for a cache key (see [`Self::origin_and_key`]), if the
+    /// origin's robots.txt declared one for our user agent.
+    pub fn crawl_delay(&self, key: &str) -> Option<f64> {
+        self.cache.get(key).and_then(|r| r.crawl_delay)
     }
 
-    /// Whether robots.txt has already been fetched (cached) for this domain.
-    pub fn has_domain(&self, domain: &str) -> bool {
-        self.cache.contains_key(domain)
+    /// Whether robots.txt has already been fetched (cached) for this key.
+    pub fn has_domain(&self, key: &str) -> bool {
+        self.cache.contains_key(key)
     }
 
     fn parse_robots(text: &str, user_agent: &str) -> RobotsRules {
         let ua_lower = user_agent.to_lowercase();
         let groups = parse_groups(text);
 
-        // Specific agent match wins over the wildcard group.
-        let specific = groups
+        // Per RFC 9309 all groups matching the agent are combined. A
+        // specific agent match wins over the wildcard groups.
+        let specific: Vec<&RobotsGroup> = groups
             .iter()
-            .find(|g| g.agents.iter().any(|a| a == &ua_lower));
-        let chosen = specific.or_else(|| groups.iter().find(|g| g.agents.iter().any(|a| a == "*")));
+            .filter(|g| g.agents.iter().any(|a| a == &ua_lower))
+            .collect();
+        let chosen: Vec<&RobotsGroup> = if specific.is_empty() {
+            groups
+                .iter()
+                .filter(|g| g.agents.iter().any(|a| a == "*"))
+                .collect()
+        } else {
+            specific
+        };
 
-        match chosen {
-            Some(g) => RobotsRules {
-                disallowed: g.disallow.clone(),
-                crawl_delay: g.crawl_delay,
-            },
-            None => RobotsRules::allow_all(),
+        if chosen.is_empty() {
+            return RobotsRules::allow_all();
+        }
+        RobotsRules {
+            rules: chosen.iter().flat_map(|g| g.rules.clone()).collect(),
+            crawl_delay: chosen.iter().find_map(|g| g.crawl_delay),
         }
     }
 }
@@ -136,10 +173,87 @@ impl RobotsTxtManager {
 impl RobotsRules {
     fn allow_all() -> Self {
         Self {
-            disallowed: Vec::new(),
+            rules: Vec::new(),
             crawl_delay: None,
         }
     }
+
+    /// Longest-match-wins over all matching Allow/Disallow patterns;
+    /// specificity is the pattern's length and Allow wins exact ties. No
+    /// matching rule means allowed.
+    fn is_path_allowed(&self, target: &str) -> bool {
+        let mut best: Option<(usize, bool)> = None;
+        for (allow, pattern) in &self.rules {
+            if pattern_matches(pattern, target) {
+                let specificity = pattern.len();
+                best = match best {
+                    None => Some((specificity, *allow)),
+                    Some((best_len, best_allow)) => {
+                        if specificity > best_len
+                            || (specificity == best_len && *allow && !best_allow)
+                        {
+                            Some((specificity, *allow))
+                        } else {
+                            Some((best_len, best_allow))
+                        }
+                    }
+                };
+            }
+        }
+        best.map(|(_, allow)| allow).unwrap_or(true)
+    }
+}
+
+/// robots.txt pattern matching: patterns are path prefixes, `*` matches any
+/// character sequence, and a trailing `$` anchors the match to the end of
+/// the target.
+fn pattern_matches(pattern: &str, target: &str) -> bool {
+    let (pat, anchored) = match pattern.strip_suffix('$') {
+        Some(p) => (p, true),
+        None => (pattern, false),
+    };
+    let parts: Vec<&str> = pat.split('*').collect();
+
+    if parts.len() == 1 {
+        // No wildcards: plain prefix, or exact match when anchored.
+        return if anchored {
+            target == parts[0]
+        } else {
+            target.starts_with(parts[0])
+        };
+    }
+
+    // First fragment is anchored at the start.
+    if !target.starts_with(parts[0]) {
+        return false;
+    }
+    let mut pos = parts[0].len();
+
+    // For anchored patterns the LAST fragment must sit at the very end of
+    // the target, so reserve that region and match the middle fragments
+    // leftmost-first inside what remains. (A naive leftmost match of the
+    // last fragment would wrongly reject e.g. pattern `/*.php$` against
+    // `/a.php.php`.)
+    let (middle, limit) = if anchored {
+        let last = parts[parts.len() - 1];
+        if !target.ends_with(last) || target.len() < pos + last.len() {
+            return false;
+        }
+        (&parts[1..parts.len() - 1], target.len() - last.len())
+    } else {
+        (&parts[1..], target.len())
+    };
+
+    for part in middle {
+        if part.is_empty() {
+            continue; // consecutive '*' collapse
+        }
+        match target[pos..limit].find(part) {
+            Some(idx) => pos += idx + part.len(),
+            None => return false,
+        }
+    }
+    pos <= limit
 }
 
 /// Parse robots.txt into groups. A group starts at one or more consecutive
@@ -152,8 +266,12 @@ fn parse_groups(text: &str) -> Vec<RobotsGroup> {
     let mut saw_directive = false;
 
     for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
+        // Strip inline comments, then whitespace.
+        let line = match raw.find('#') {
+            Some(idx) => raw[..idx].trim(),
+            None => raw.trim(),
+        };
+        if line.is_empty() {
             continue;
         }
 
@@ -166,15 +284,22 @@ fn parse_groups(text: &str) -> Vec<RobotsGroup> {
             }
             let g = current.get_or_insert_with(|| RobotsGroup {
                 agents: Vec::new(),
-                disallow: Vec::new(),
+                rules: Vec::new(),
                 crawl_delay: None,
             });
             g.agents.push(rest.trim().to_lowercase());
         } else if let Some(g) = current.as_mut() {
             if let Some(rest) = strip_prefix_ci(line, "disallow:") {
                 let path = rest.trim();
+                // An empty Disallow means "allow everything" — no rule.
                 if !path.is_empty() {
-                    g.disallow.push(path.to_string());
+                    g.rules.push((false, path.to_string()));
+                }
+                saw_directive = true;
+            } else if let Some(rest) = strip_prefix_ci(line, "allow:") {
+                let path = rest.trim();
+                if !path.is_empty() {
+                    g.rules.push((true, path.to_string()));
                 }
                 saw_directive = true;
             } else if let Some(rest) = strip_prefix_ci(line, "crawl-delay:") {
@@ -205,34 +330,42 @@ fn strip_prefix_ci<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
 mod tests {
     use super::*;
 
+    fn mgr_with(txt: &str, ua: &str, key: &str) -> RobotsTxtManager {
+        let mut mgr = RobotsTxtManager::new(ua);
+        mgr.insert_rules(key, FetchedRobots(RobotsTxtManager::parse_robots(txt, ua)));
+        mgr
+    }
+
     #[test]
     fn multi_agent_group_applies_to_each_agent() {
         let txt = "User-agent: MyBot\nUser-agent: Googlebot\nDisallow: /private\n";
-        let rules = RobotsTxtManager::parse_robots(txt, "MyBot");
-        assert_eq!(rules.disallowed, vec!["/private".to_string()]);
-        let rules = RobotsTxtManager::parse_robots(txt, "Googlebot");
-        assert_eq!(rules.disallowed, vec!["/private".to_string()]);
+        for ua in ["MyBot", "Googlebot"] {
+            let mgr = mgr_with(txt, ua, "example.com");
+            assert!(!mgr.is_allowed("https://example.com/private/x"));
+            assert!(mgr.is_allowed("https://example.com/public"));
+        }
     }
 
     #[test]
     fn specific_agent_wins_over_wildcard() {
         let txt = "User-agent: *\nDisallow: /all\n\nUser-agent: MyBot\nDisallow: /mine\n";
-        let rules = RobotsTxtManager::parse_robots(txt, "MyBot");
-        assert_eq!(rules.disallowed, vec!["/mine".to_string()]);
+        let mgr = mgr_with(txt, "MyBot", "example.com");
+        assert!(!mgr.is_allowed("https://example.com/mine"));
+        assert!(mgr.is_allowed("https://example.com/all"));
     }
 
     #[test]
     fn wildcard_applies_when_no_specific_match() {
         let txt = "User-agent: *\nDisallow: /all\n";
-        let rules = RobotsTxtManager::parse_robots(txt, "OtherBot");
-        assert_eq!(rules.disallowed, vec!["/all".to_string()]);
+        let mgr = mgr_with(txt, "OtherBot", "example.com");
+        assert!(!mgr.is_allowed("https://example.com/all"));
     }
 
     #[test]
     fn unknown_agent_with_no_wildcard_is_allow_all() {
         let txt = "User-agent: SomeoneElse\nDisallow: /\n";
-        let rules = RobotsTxtManager::parse_robots(txt, "MyBot");
-        assert!(rules.disallowed.is_empty());
+        let mgr = mgr_with(txt, "MyBot", "example.com");
+        assert!(mgr.is_allowed("https://example.com/anything"));
     }
 
     #[test]
@@ -240,6 +373,133 @@ mod tests {
         let txt = "User-agent: *\nCrawl-delay: 5\n";
         let rules = RobotsTxtManager::parse_robots(txt, "MyBot");
         assert_eq!(rules.crawl_delay, Some(5.0));
+    }
+
+    #[test]
+    fn allow_overrides_broader_disallow() {
+        // The classic pattern the old prefix-only matcher got wrong:
+        // Disallow: / + Allow: /public must NOT block everything.
+        let txt = "User-agent: *\nDisallow: /\nAllow: /public\n";
+        let mgr = mgr_with(txt, "MyBot", "example.com");
+        assert!(mgr.is_allowed("https://example.com/public"));
+        assert!(mgr.is_allowed("https://example.com/public/page"));
+        assert!(!mgr.is_allowed("https://example.com/private"));
+        assert!(!mgr.is_allowed("https://example.com/"));
+    }
+
+    #[test]
+    fn longest_match_wins_regardless_of_order() {
+        let txt = "User-agent: *\nAllow: /a\nDisallow: /a/b\nAllow: /a/b/c\n";
+        let mgr = mgr_with(txt, "MyBot", "example.com");
+        assert!(mgr.is_allowed("https://example.com/a/x"));
+        assert!(!mgr.is_allowed("https://example.com/a/b/x"));
+        assert!(mgr.is_allowed("https://example.com/a/b/c/x"));
+    }
+
+    #[test]
+    fn allow_wins_specificity_ties() {
+        let txt = "User-agent: *\nDisallow: /page\nAllow: /page\n";
+        let mgr = mgr_with(txt, "MyBot", "example.com");
+        assert!(mgr.is_allowed("https://example.com/page"));
+    }
+
+    #[test]
+    fn star_wildcard_matches_inside_paths() {
+        // `?` is a literal in robots patterns: `/*?sessionid` requires
+        // sessionid directly after the `?`; `/*sessionid=` matches it
+        // anywhere in the path-plus-query target.
+        let txt = "User-agent: *\nDisallow: /*?sessionid\nDisallow: /*sessionid=\n";
+        let mgr = mgr_with(txt, "MyBot", "example.com");
+        // Query strings are part of the match target.
+        assert!(!mgr.is_allowed("https://example.com/page?sessionid=42"));
+        assert!(!mgr.is_allowed("https://example.com/a/b?x=1&sessionid=2"));
+        assert!(mgr.is_allowed("https://example.com/page"));
+
+        let only_direct = mgr_with(
+            "User-agent: *\nDisallow: /*?sessionid\n",
+            "MyBot",
+            "example.com",
+        );
+        // Literal `?sessionid` does not match `&sessionid`.
+        assert!(only_direct.is_allowed("https://example.com/a/b?x=1&sessionid=2"));
+    }
+
+    #[test]
+    fn dollar_anchors_to_end() {
+        let txt = "User-agent: *\nDisallow: /*.php$\n";
+        let mgr = mgr_with(txt, "MyBot", "example.com");
+        assert!(!mgr.is_allowed("https://example.com/index.php"));
+        // A later occurrence of the suffix still anchors: /a.php.php ends
+        // with .php even though the FIRST .php is mid-string.
+        assert!(!mgr.is_allowed("https://example.com/a.php.php"));
+        assert!(mgr.is_allowed("https://example.com/a.php.bak"));
+    }
+
+    #[test]
+    fn pattern_matching_edge_cases() {
+        assert!(pattern_matches("/", "/anything"));
+        assert!(pattern_matches("/a*b*c", "/a-x-b-y-c-z"));
+        assert!(!pattern_matches("/a*b$", "/a-b-tail"));
+        assert!(pattern_matches("/a*b$", "/a-x-b"));
+        assert!(pattern_matches("/a**b", "/ab"));
+        assert!(pattern_matches("/exact$", "/exact"));
+        assert!(!pattern_matches("/exact$", "/exact/more"));
+        // Overlap guard: pattern /a$ with wildcard prefix cannot match a
+        // target shorter than first+last fragments combined.
+        assert!(!pattern_matches("/aa*aa$", "/aaa"));
+    }
+
+    #[test]
+    fn inline_comments_are_stripped() {
+        let txt = "User-agent: * # everyone\nDisallow: /private # keep out\n";
+        let mgr = mgr_with(txt, "MyBot", "example.com");
+        assert!(!mgr.is_allowed("https://example.com/private/x"));
+        assert!(mgr.is_allowed("https://example.com/open"));
+    }
+
+    #[test]
+    fn multiple_groups_for_same_agent_are_combined() {
+        let txt = "User-agent: MyBot\nDisallow: /one\n\nUser-agent: MyBot\nDisallow: /two\n";
+        let mgr = mgr_with(txt, "MyBot", "example.com");
+        assert!(!mgr.is_allowed("https://example.com/one"));
+        assert!(!mgr.is_allowed("https://example.com/two"));
+        assert!(mgr.is_allowed("https://example.com/three"));
+    }
+
+    #[test]
+    fn origin_and_key_preserve_scheme_and_port() {
+        assert_eq!(
+            RobotsTxtManager::origin_and_key("http://shop.example:8080/x?y=1"),
+            Some((
+                "http://shop.example:8080".to_string(),
+                "shop.example:8080".to_string()
+            ))
+        );
+        assert_eq!(
+            RobotsTxtManager::origin_and_key("https://example.com/path"),
+            Some(("https://example.com".to_string(), "example.com".to_string()))
+        );
+        // Default port is normalized away by the URL parser.
+        assert_eq!(
+            RobotsTxtManager::origin_and_key("https://example.com:443/x"),
+            Some(("https://example.com".to_string(), "example.com".to_string()))
+        );
+        assert_eq!(RobotsTxtManager::origin_and_key("data:text/plain,hi"), None);
+    }
+
+    #[test]
+    fn distinct_ports_have_distinct_rules() {
+        let mut mgr = RobotsTxtManager::new("MyBot");
+        mgr.insert_rules(
+            "example.com:8080",
+            FetchedRobots(RobotsTxtManager::parse_robots(
+                "User-agent: *\nDisallow: /\n",
+                "MyBot",
+            )),
+        );
+        assert!(!mgr.is_allowed("http://example.com:8080/x"));
+        // No rules stored for the default-port origin -> allowed.
+        assert!(mgr.is_allowed("http://example.com/x"));
     }
 
     #[test]
