@@ -26,9 +26,14 @@ scraper = "0.27"
 ego-tree = "0.11"
 cssparser = "0.37"
 reqwest = { version = "0.12", features = ["json", "cookies", "gzip", "brotli", "deflate", "rustls-tls"] }
-tokio = { version = "1", features = ["full"] }
+# Only the tokio pieces the library and CLI actually use — "full" would
+# force signal/process/IO-driver machinery onto every consumer.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order keeps item keys in insertion order (backed by indexmap,
+# already a dependency), matching Python dict semantics in the upstream
+# project — item fields export in the order spiders build them.
+serde_json = { version = "1", features = ["preserve_order"] }
 # "bundled" statically links a vendored SQLite for portability. SQLite CVEs
 # therefore require a crate bump rather than an OS update — Dependabot (see
 # .github/dependabot.yml) surfaces those bumps as PRs, and `cargo audit` in CI
@@ -40,10 +45,13 @@ sha2 = "0.10"
 url = "2"
 percent-encoding = "2"
 thiserror = "2"
-once_cell = "1"
 indexmap = { version = "2", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"
 async-trait = "0.1"
 tempfile = "3"
+
+[dev-dependencies]
+# Tests run local TCP servers; the library itself needs no socket API.
+tokio = { version = "1", features = ["net", "io-util"] }

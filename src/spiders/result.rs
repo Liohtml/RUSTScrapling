@@ -46,6 +46,145 @@ impl ItemList {
         }
         Ok(())
     }
+
+    /// Write items as CSV (RFC 4180 quoting). The header is the union of all
+    /// keys across all items in first-seen order, so heterogeneous item
+    /// shapes export without data loss — an item simply leaves cells empty
+    /// for keys it doesn't have. Nested values (objects/arrays) are
+    /// serialized as JSON strings; null becomes an empty cell. Items that
+    /// are not JSON objects are skipped.
+    pub fn to_csv(&self, path: &Path) -> io::Result<()> {
+        let columns = self.union_of_keys();
+        let mut out = String::new();
+
+        let write_row = |fields: &mut dyn Iterator<Item = String>, out: &mut String| {
+            let mut first = true;
+            for field in fields {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str(&csv_escape(&field));
+            }
+            out.push_str("\r\n");
+        };
+
+        write_row(&mut columns.iter().cloned(), &mut out);
+        for item in &self.items {
+            let obj = match item.as_object() {
+                Some(o) => o,
+                None => continue,
+            };
+            write_row(
+                &mut columns
+                    .iter()
+                    .map(|key| obj.get(key).map(flatten_value).unwrap_or_default()),
+                &mut out,
+            );
+        }
+        fs::write(path, out)
+    }
+
+    /// Write items as XML: `<items><item><key>value</key>…</item></items>`.
+    /// Keys are sanitized into valid XML element names (invalid characters
+    /// become `_`; a leading digit is prefixed); text content is entity
+    /// escaped. Nested values (objects/arrays) are serialized as JSON
+    /// strings; null becomes an empty element. Items that are not JSON
+    /// objects are skipped.
+    pub fn to_xml(&self, path: &Path) -> io::Result<()> {
+        let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<items>\n");
+        for item in &self.items {
+            let obj = match item.as_object() {
+                Some(o) => o,
+                None => continue,
+            };
+            out.push_str("  <item>\n");
+            for (key, value) in obj {
+                let tag = xml_element_name(key);
+                out.push_str("    <");
+                out.push_str(&tag);
+                out.push('>');
+                out.push_str(&xml_escape(&flatten_value(value)));
+                out.push_str("</");
+                out.push_str(&tag);
+                out.push_str(">\n");
+            }
+            out.push_str("  </item>\n");
+        }
+        out.push_str("</items>\n");
+        fs::write(path, out)
+    }
+
+    /// Union of all object keys across all items, in first-seen order.
+    fn union_of_keys(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut columns = Vec::new();
+        for item in &self.items {
+            if let Some(obj) = item.as_object() {
+                for key in obj.keys() {
+                    if seen.insert(key.clone()) {
+                        columns.push(key.clone());
+                    }
+                }
+            }
+        }
+        columns
+    }
+}
+
+/// A JSON value as a flat cell/text value: strings verbatim, scalars via
+/// display, null empty, and nested objects/arrays as compact JSON strings
+/// (so heterogeneous nesting survives flat formats losslessly).
+fn flatten_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        nested => nested.to_string(),
+    }
+}
+
+/// RFC 4180: quote a field if it contains a comma, quote, or line break;
+/// double any quotes inside.
+fn csv_escape(field: &str) -> String {
+    if field.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", field.replace('"', "\"\""))
+    } else {
+        field.to_string()
+    }
+}
+
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// Sanitize an arbitrary JSON key into a valid XML element name: characters
+/// outside [A-Za-z0-9_.-] become `_`, and a name that would start with a
+/// digit, dot, or dash is prefixed with `_`. Empty keys become `_`.
+fn xml_element_name(key: &str) -> String {
+    let mut name: String = key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if name.is_empty() {
+        name.push('_');
+    }
+    let first = name.chars().next().expect("non-empty");
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        name.insert(0, '_');
+    }
+    name
 }
 
 impl IntoIterator for ItemList {
@@ -76,8 +215,14 @@ pub struct CrawlStats {
     pub start_time: Option<Instant>,
     pub end_time: Option<Instant>,
     pub response_status_count: HashMap<u16, u64>,
+    /// Decoded response bytes per domain, populated by the engine on every
+    /// live (non-cache) response.
     pub domains_response_bytes: HashMap<String, u64>,
+    /// Live requests per session id ("default" for requests without one),
+    /// populated by the engine.
     pub sessions_requests_count: HashMap<String, u64>,
+    /// Free-form slot for user pipelines to attach their own metrics to a
+    /// crawl result; the engine itself never writes it.
     pub custom_stats: HashMap<String, serde_json::Value>,
 }
 
@@ -149,5 +294,105 @@ pub struct CrawlResult {
 impl CrawlResult {
     pub fn completed(&self) -> bool {
         !self.paused
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    fn sample_items() -> ItemList {
+        let mut items = ItemList::new();
+        items.push(json!({
+            "title": "Plain",
+            "price": 9.99,
+            "tags": ["a", "b"],
+        }));
+        items.push(json!({
+            "title": "Quote \"and\", comma",
+            "sku": "X-1",
+            "meta": {"color": "red"},
+        }));
+        items
+    }
+
+    #[test]
+    fn csv_unions_heterogeneous_keys_and_escapes() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("items.csv");
+        sample_items().to_csv(&path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Header: union of keys in first-seen order.
+        assert_eq!(lines[0], "title,price,tags,sku,meta");
+        // Item 1: no sku/meta -> empty trailing cells; array as JSON string.
+        assert_eq!(lines[1], "Plain,9.99,\"[\"\"a\"\",\"\"b\"\"]\",,");
+        // Item 2: quotes doubled, field quoted; no price/tags -> empty cells.
+        assert_eq!(
+            lines[2],
+            "\"Quote \"\"and\"\", comma\",,,X-1,\"{\"\"color\"\":\"\"red\"\"}\""
+        );
+    }
+
+    #[test]
+    fn csv_skips_non_object_items() {
+        let mut items = ItemList::new();
+        items.push(json!("just a string"));
+        items.push(json!({"k": "v"}));
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("items.csv");
+        items.to_csv(&path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content.lines().count(), 2, "header + one object row");
+    }
+
+    #[test]
+    fn xml_escapes_text_and_sanitizes_element_names() {
+        let mut items = ItemList::new();
+        items.push(json!({
+            "title": "a < b & c > 'd'",
+            "weird key!": "v",
+            "1st": "leading digit",
+            "": "empty key",
+        }));
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("items.xml");
+        items.to_xml(&path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+
+        assert!(content.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
+        assert!(content.contains("<title>a &lt; b &amp; c &gt; &apos;d&apos;</title>"));
+        assert!(content.contains("<weird_key_>v</weird_key_>"));
+        assert!(content.contains("<_1st>leading digit</_1st>"));
+        assert!(content.contains("<_>empty key</_>"));
+        assert!(content.trim_end().ends_with("</items>"));
+    }
+
+    #[test]
+    fn xml_nested_values_become_json_strings() {
+        let mut items = ItemList::new();
+        items.push(json!({"meta": {"a": 1}, "none": null}));
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("items.xml");
+        items.to_xml(&path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("<meta>{&quot;a&quot;:1}</meta>"));
+        assert!(content.contains("<none></none>"));
+    }
+
+    #[test]
+    fn empty_item_list_exports_header_only_csv_and_empty_xml() {
+        let items = ItemList::new();
+        let dir = tempdir().unwrap();
+        let csv = dir.path().join("empty.csv");
+        let xml = dir.path().join("empty.xml");
+        items.to_csv(&csv).unwrap();
+        items.to_xml(&xml).unwrap();
+        assert_eq!(std::fs::read_to_string(&csv).unwrap(), "\r\n");
+        let xml_content = std::fs::read_to_string(&xml).unwrap();
+        assert!(xml_content.contains("<items>\n</items>"));
     }
 }
