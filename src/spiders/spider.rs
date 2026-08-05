@@ -26,6 +26,28 @@ pub trait Spider: Send + Sync + 'static {
     fn download_delay(&self) -> f64 {
         0.0
     }
+    /// Enable AutoThrottle: adaptive per-domain delays based on measured
+    /// response latency, doubling on 429/503 (honoring `Retry-After`) and
+    /// easing back down when the server is healthy. `download_delay` and the
+    /// site's robots.txt `Crawl-delay` act as floors that are never
+    /// undercut. When enabled, the static `download_delay` pacing is
+    /// replaced by the adaptive per-domain schedule.
+    fn autothrottle_enabled(&self) -> bool {
+        false
+    }
+    /// Initial per-domain delay (seconds) until latency data exists.
+    fn autothrottle_start_delay(&self) -> f64 {
+        5.0
+    }
+    /// Hard upper bound (seconds) the adaptive delay never exceeds.
+    fn autothrottle_max_delay(&self) -> f64 {
+        60.0
+    }
+    /// Desired average number of in-flight requests per domain; the adaptive
+    /// delay targets `latency / target_concurrency`.
+    fn autothrottle_target_concurrency(&self) -> f64 {
+        1.0
+    }
     fn max_blocked_retries(&self) -> u32 {
         3
     }

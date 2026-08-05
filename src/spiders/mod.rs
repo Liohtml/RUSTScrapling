@@ -10,3 +10,4 @@ pub mod scheduler;
 pub mod session;
 pub mod spider;
 pub mod templates;
+pub mod throttle;

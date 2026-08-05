@@ -826,3 +826,105 @@ async fn blocked_responses_are_not_cached_in_dev_mode() {
         "a blocked response must never be written to the dev cache"
     );
 }
+
+/// Spider with AutoThrottle enabled against a live local server.
+struct ThrottledSpider {
+    urls: Vec<String>,
+}
+
+#[async_trait]
+impl Spider for ThrottledSpider {
+    fn name(&self) -> &str {
+        "throttled-spider"
+    }
+    fn start_urls(&self) -> Vec<String> {
+        self.urls.clone()
+    }
+    fn autothrottle_enabled(&self) -> bool {
+        true
+    }
+    fn autothrottle_start_delay(&self) -> f64 {
+        0.05 // fast until the server pushes back
+    }
+    fn max_blocked_retries(&self) -> u32 {
+        1
+    }
+
+    async fn parse(
+        &self,
+        response: SpiderResponse,
+    ) -> (Vec<serde_json::Value>, Vec<SpiderRequest>) {
+        (vec![serde_json::json!({ "url": response.url() })], vec![])
+    }
+}
+
+#[tokio::test]
+async fn autothrottle_backs_off_on_retry_after_before_retrying() {
+    // First response is a 429 with Retry-After: 1. The 429 is blocked ->
+    // re-enqueued once (max_blocked_retries = 1). AutoThrottle must push the
+    // domain's schedule out, so the retry reaches the server >= ~1s after
+    // the first request, even though the start delay is only 50ms. The
+    // second response is a 200 and the crawl completes.
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut request_times = Vec::new();
+        for i in 0..2usize {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            request_times.push(std::time::Instant::now());
+            let mut buf = [0u8; 4096];
+            let mut head = Vec::new();
+            loop {
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buf[..n]);
+                if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let response = if i == 0 {
+                "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Type: text/html\r\nContent-Length: 7\r\nConnection: close\r\n\r\nslow it".to_string()
+            } else {
+                let body = "<html><body>ok</body></html>";
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+            };
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        }
+        request_times
+    });
+
+    let url = format!("http://{}/throttled", addr);
+    let spider = Arc::new(ThrottledSpider { urls: vec![url] });
+    let engine = CrawlerEngine::new(spider, SessionManager::new(FetcherConfig::default()), None)
+        .expect("engine builds");
+
+    let result = engine.crawl().await;
+    let times = tokio::time::timeout(std::time::Duration::from_secs(30), server)
+        .await
+        .expect("server must see the original request and the retry")
+        .unwrap();
+
+    assert_eq!(result.items.len(), 1, "retry must eventually succeed");
+    assert_eq!(result.stats.blocked_requests_count, 1);
+    let gap = times[1].duration_since(times[0]);
+    assert!(
+        gap.as_secs_f64() >= 0.9,
+        "retry must wait ~Retry-After (1s) after the 429; gap was {:?}",
+        gap
+    );
+    assert!(
+        gap.as_secs_f64() < 10.0,
+        "back-off must not balloon; gap was {:?}",
+        gap
+    );
+}
