@@ -44,23 +44,22 @@ impl RobotsTxtManager {
         &self.user_agent
     }
 
-    /// Derive the robots.txt origin and cache key for a request URL.
-    /// The origin preserves the URL's actual scheme and any explicit port
-    /// (`http://shop.example:8080`), so robots.txt is fetched from where the
-    /// site actually lives instead of a hardcoded `https://host/`. The key
-    /// is `host` or `host:port` (port omitted when it is the scheme
-    /// default). Returns `None` for URLs without a host (data:, mailto:,
-    /// malformed), which skip robots handling entirely.
+    /// Derive the robots.txt origin for a request URL, preserving the URL's
+    /// actual scheme and any explicit port (`http://shop.example:8080`), so
+    /// robots.txt is fetched from where the site actually lives instead of a
+    /// hardcoded `https://host/`. The origin doubles as the rules cache key
+    /// — RFC 9309 scopes robots.txt per scheme + authority, so
+    /// `http://example.com` and `https://example.com` keep distinct rules.
+    /// Returns `None` for URLs without a host (data:, mailto:, malformed),
+    /// which skip robots handling entirely.
     pub fn origin_and_key(url: &str) -> Option<(String, String)> {
         let u = Url::parse(url).ok()?;
-        let host = u.host_str()?.to_string();
-        match u.port() {
-            Some(port) => Some((
-                format!("{}://{}:{}", u.scheme(), host, port),
-                format!("{}:{}", host, port),
-            )),
-            None => Some((format!("{}://{}", u.scheme(), host), host)),
-        }
+        let host = u.host_str()?;
+        let origin = match u.port() {
+            Some(port) => format!("{}://{}:{}", u.scheme(), host, port),
+            None => format!("{}://{}", u.scheme(), host),
+        };
+        Some((origin.clone(), origin))
     }
 
     /// Fetch and parse robots.txt for an origin without borrowing a manager.
@@ -96,13 +95,20 @@ impl RobotsTxtManager {
         self.cache.insert(key.to_string(), rules.0);
     }
 
-    /// Fetch and store robots.txt for a bare domain (https assumed) in one
-    /// step. Prefer the [`Self::fetch_rules`] + [`Self::insert_rules`] split
-    /// when the manager lives behind a lock — this method borrows `self` for
-    /// the whole network round-trip.
+    /// Fetch and store robots.txt for an origin (or bare domain, https
+    /// assumed) in one step. Prefer the [`Self::fetch_rules`] +
+    /// [`Self::insert_rules`] split when the manager lives behind a lock —
+    /// this method borrows `self` for the whole network round-trip.
     pub async fn fetch_robots(&mut self, domain: &str) {
+        // Normalize a bare domain to the https origin so the stored key
+        // matches what is_allowed derives from https URLs.
+        let key = if domain.contains("://") {
+            domain.to_string()
+        } else {
+            format!("https://{}", domain)
+        };
         let rules = Self::fetch_rules(&self.user_agent, domain).await;
-        self.insert_rules(domain, rules);
+        self.insert_rules(&key, rules);
     }
 
     /// Whether `url` is allowed by the stored rules for its origin. Origins
@@ -143,13 +149,21 @@ impl RobotsTxtManager {
 
     fn parse_robots(text: &str, user_agent: &str) -> RobotsRules {
         let ua_lower = user_agent.to_lowercase();
+        // RFC 9309 matches groups against the crawler's product token, so
+        // "User-agent: MyBot" applies to a crawler identifying as
+        // "MyBot/1.0 (+https://example.com/bot)".
+        let ua_token = ua_lower
+            .split(['/', ' '])
+            .next()
+            .unwrap_or(&ua_lower)
+            .to_string();
         let groups = parse_groups(text);
 
         // Per RFC 9309 all groups matching the agent are combined. A
         // specific agent match wins over the wildcard groups.
         let specific: Vec<&RobotsGroup> = groups
             .iter()
-            .filter(|g| g.agents.iter().any(|a| a == &ua_lower))
+            .filter(|g| g.agents.iter().any(|a| a == &ua_lower || a == &ua_token))
             .collect();
         let chosen: Vec<&RobotsGroup> = if specific.is_empty() {
             groups
@@ -340,7 +354,7 @@ mod tests {
     fn multi_agent_group_applies_to_each_agent() {
         let txt = "User-agent: MyBot\nUser-agent: Googlebot\nDisallow: /private\n";
         for ua in ["MyBot", "Googlebot"] {
-            let mgr = mgr_with(txt, ua, "example.com");
+            let mgr = mgr_with(txt, ua, "https://example.com");
             assert!(!mgr.is_allowed("https://example.com/private/x"));
             assert!(mgr.is_allowed("https://example.com/public"));
         }
@@ -349,7 +363,7 @@ mod tests {
     #[test]
     fn specific_agent_wins_over_wildcard() {
         let txt = "User-agent: *\nDisallow: /all\n\nUser-agent: MyBot\nDisallow: /mine\n";
-        let mgr = mgr_with(txt, "MyBot", "example.com");
+        let mgr = mgr_with(txt, "MyBot", "https://example.com");
         assert!(!mgr.is_allowed("https://example.com/mine"));
         assert!(mgr.is_allowed("https://example.com/all"));
     }
@@ -357,14 +371,14 @@ mod tests {
     #[test]
     fn wildcard_applies_when_no_specific_match() {
         let txt = "User-agent: *\nDisallow: /all\n";
-        let mgr = mgr_with(txt, "OtherBot", "example.com");
+        let mgr = mgr_with(txt, "OtherBot", "https://example.com");
         assert!(!mgr.is_allowed("https://example.com/all"));
     }
 
     #[test]
     fn unknown_agent_with_no_wildcard_is_allow_all() {
         let txt = "User-agent: SomeoneElse\nDisallow: /\n";
-        let mgr = mgr_with(txt, "MyBot", "example.com");
+        let mgr = mgr_with(txt, "MyBot", "https://example.com");
         assert!(mgr.is_allowed("https://example.com/anything"));
     }
 
@@ -380,7 +394,7 @@ mod tests {
         // The classic pattern the old prefix-only matcher got wrong:
         // Disallow: / + Allow: /public must NOT block everything.
         let txt = "User-agent: *\nDisallow: /\nAllow: /public\n";
-        let mgr = mgr_with(txt, "MyBot", "example.com");
+        let mgr = mgr_with(txt, "MyBot", "https://example.com");
         assert!(mgr.is_allowed("https://example.com/public"));
         assert!(mgr.is_allowed("https://example.com/public/page"));
         assert!(!mgr.is_allowed("https://example.com/private"));
@@ -390,7 +404,7 @@ mod tests {
     #[test]
     fn longest_match_wins_regardless_of_order() {
         let txt = "User-agent: *\nAllow: /a\nDisallow: /a/b\nAllow: /a/b/c\n";
-        let mgr = mgr_with(txt, "MyBot", "example.com");
+        let mgr = mgr_with(txt, "MyBot", "https://example.com");
         assert!(mgr.is_allowed("https://example.com/a/x"));
         assert!(!mgr.is_allowed("https://example.com/a/b/x"));
         assert!(mgr.is_allowed("https://example.com/a/b/c/x"));
@@ -399,7 +413,7 @@ mod tests {
     #[test]
     fn allow_wins_specificity_ties() {
         let txt = "User-agent: *\nDisallow: /page\nAllow: /page\n";
-        let mgr = mgr_with(txt, "MyBot", "example.com");
+        let mgr = mgr_with(txt, "MyBot", "https://example.com");
         assert!(mgr.is_allowed("https://example.com/page"));
     }
 
@@ -409,7 +423,7 @@ mod tests {
         // sessionid directly after the `?`; `/*sessionid=` matches it
         // anywhere in the path-plus-query target.
         let txt = "User-agent: *\nDisallow: /*?sessionid\nDisallow: /*sessionid=\n";
-        let mgr = mgr_with(txt, "MyBot", "example.com");
+        let mgr = mgr_with(txt, "MyBot", "https://example.com");
         // Query strings are part of the match target.
         assert!(!mgr.is_allowed("https://example.com/page?sessionid=42"));
         assert!(!mgr.is_allowed("https://example.com/a/b?x=1&sessionid=2"));
@@ -418,7 +432,7 @@ mod tests {
         let only_direct = mgr_with(
             "User-agent: *\nDisallow: /*?sessionid\n",
             "MyBot",
-            "example.com",
+            "https://example.com",
         );
         // Literal `?sessionid` does not match `&sessionid`.
         assert!(only_direct.is_allowed("https://example.com/a/b?x=1&sessionid=2"));
@@ -427,7 +441,7 @@ mod tests {
     #[test]
     fn dollar_anchors_to_end() {
         let txt = "User-agent: *\nDisallow: /*.php$\n";
-        let mgr = mgr_with(txt, "MyBot", "example.com");
+        let mgr = mgr_with(txt, "MyBot", "https://example.com");
         assert!(!mgr.is_allowed("https://example.com/index.php"));
         // A later occurrence of the suffix still anchors: /a.php.php ends
         // with .php even though the FIRST .php is mid-string.
@@ -452,7 +466,7 @@ mod tests {
     #[test]
     fn inline_comments_are_stripped() {
         let txt = "User-agent: * # everyone\nDisallow: /private # keep out\n";
-        let mgr = mgr_with(txt, "MyBot", "example.com");
+        let mgr = mgr_with(txt, "MyBot", "https://example.com");
         assert!(!mgr.is_allowed("https://example.com/private/x"));
         assert!(mgr.is_allowed("https://example.com/open"));
     }
@@ -460,7 +474,7 @@ mod tests {
     #[test]
     fn multiple_groups_for_same_agent_are_combined() {
         let txt = "User-agent: MyBot\nDisallow: /one\n\nUser-agent: MyBot\nDisallow: /two\n";
-        let mgr = mgr_with(txt, "MyBot", "example.com");
+        let mgr = mgr_with(txt, "MyBot", "https://example.com");
         assert!(!mgr.is_allowed("https://example.com/one"));
         assert!(!mgr.is_allowed("https://example.com/two"));
         assert!(mgr.is_allowed("https://example.com/three"));
@@ -472,17 +486,23 @@ mod tests {
             RobotsTxtManager::origin_and_key("http://shop.example:8080/x?y=1"),
             Some((
                 "http://shop.example:8080".to_string(),
-                "shop.example:8080".to_string()
+                "http://shop.example:8080".to_string()
             ))
         );
         assert_eq!(
             RobotsTxtManager::origin_and_key("https://example.com/path"),
-            Some(("https://example.com".to_string(), "example.com".to_string()))
+            Some((
+                "https://example.com".to_string(),
+                "https://example.com".to_string()
+            ))
         );
         // Default port is normalized away by the URL parser.
         assert_eq!(
             RobotsTxtManager::origin_and_key("https://example.com:443/x"),
-            Some(("https://example.com".to_string(), "example.com".to_string()))
+            Some((
+                "https://example.com".to_string(),
+                "https://example.com".to_string()
+            ))
         );
         assert_eq!(RobotsTxtManager::origin_and_key("data:text/plain,hi"), None);
     }
@@ -491,7 +511,7 @@ mod tests {
     fn distinct_ports_have_distinct_rules() {
         let mut mgr = RobotsTxtManager::new("MyBot");
         mgr.insert_rules(
-            "example.com:8080",
+            "http://example.com:8080",
             FetchedRobots(RobotsTxtManager::parse_robots(
                 "User-agent: *\nDisallow: /\n",
                 "MyBot",
@@ -503,34 +523,65 @@ mod tests {
     }
 
     #[test]
+    fn distinct_schemes_have_distinct_rules() {
+        // RFC 9309 scopes robots.txt per scheme + authority: rules fetched
+        // for the http origin must not govern the https origin.
+        let mut mgr = RobotsTxtManager::new("MyBot");
+        mgr.insert_rules(
+            "http://example.com",
+            FetchedRobots(RobotsTxtManager::parse_robots(
+                "User-agent: *\nDisallow: /\n",
+                "MyBot",
+            )),
+        );
+        assert!(!mgr.is_allowed("http://example.com/x"));
+        assert!(mgr.is_allowed("https://example.com/x"));
+    }
+
+    #[test]
+    fn user_agent_product_token_matches_group() {
+        // A crawler identifying as "MyBot/1.0 (+url)" must match the
+        // "User-agent: MyBot" group (RFC 9309 product-token matching).
+        let txt = "User-agent: MyBot\nDisallow: /private\n";
+        let mgr = mgr_with(
+            txt,
+            "MyBot/1.0 (+https://example.com/bot)",
+            "https://example.com",
+        );
+        assert!(!mgr.is_allowed("https://example.com/private/x"));
+        assert!(mgr.is_allowed("https://example.com/open"));
+    }
+
+    #[test]
     fn insert_rules_stores_fetched_rules_under_domain() {
         // The fetch_rules/insert_rules split exists so the (slow) network
         // fetch can run without borrowing the manager; verify the two-step
         // path behaves like the one-step fetch_robots.
         let mut mgr = RobotsTxtManager::new("MyBot");
-        assert!(!mgr.has_domain("example.com"));
+        assert!(!mgr.has_domain("https://example.com"));
         assert_eq!(mgr.user_agent(), "MyBot");
 
         let rules = FetchedRobots(RobotsTxtManager::parse_robots(
             "User-agent: *\nDisallow: /private\nCrawl-delay: 2\n",
             "MyBot",
         ));
-        mgr.insert_rules("example.com", rules);
+        mgr.insert_rules("https://example.com", rules);
 
-        assert!(mgr.has_domain("example.com"));
+        assert!(mgr.has_domain("https://example.com"));
         assert!(!mgr.is_allowed("https://example.com/private/page"));
         assert!(mgr.is_allowed("https://example.com/public"));
-        assert_eq!(mgr.crawl_delay("example.com"), Some(2.0));
+        assert_eq!(mgr.crawl_delay("https://example.com"), Some(2.0));
     }
 
     #[tokio::test]
-    async fn fetch_rules_for_unreachable_domain_is_allow_all() {
-        // The .invalid TLD (RFC 2606) can never resolve: fetch_rules must
-        // fall back to allow-all rather than erroring or hanging.
-        let rules = RobotsTxtManager::fetch_rules("MyBot", "unreachable.invalid").await;
+    async fn fetch_robots_normalizes_bare_domain_to_https_key() {
+        // The .invalid TLD (RFC 2606) can never resolve: the fetch must
+        // fall back to allow-all rather than erroring or hanging. The bare
+        // domain is stored under its https origin so https-URL lookups hit
+        // the entry.
         let mut mgr = RobotsTxtManager::new("MyBot");
-        mgr.insert_rules("unreachable.invalid", rules);
-        assert!(mgr.has_domain("unreachable.invalid"));
+        mgr.fetch_robots("unreachable.invalid").await;
+        assert!(mgr.has_domain("https://unreachable.invalid"));
         assert!(mgr.is_allowed("https://unreachable.invalid/anything"));
     }
 }
