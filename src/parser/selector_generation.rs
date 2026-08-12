@@ -8,7 +8,8 @@ use crate::parser::selector::Selector;
 ///
 /// Path segments use `:nth-of-type(n)` whenever an element shares its tag
 /// with siblings. If `full_path` is `false`, the path stops at the nearest
-/// ancestor with an `id` attribute (emitted as `#id`); if `true`, the
+/// ancestor with an `id` attribute (emitted as `[id="…"]`, valid for any
+/// id value); if `true`, the
 /// complete `>`-joined path from the root is generated.
 #[must_use]
 pub fn generate_css_selector(selector: &Selector, full_path: bool) -> String {
@@ -30,7 +31,10 @@ pub fn generate_css_selector(selector: &Selector, full_path: bool) -> String {
                 // backslashes and quotes are escaped.
                 parts.push(format!(
                     "[id=\"{}\"]",
-                    id.as_str().replace('\\', "\\\\").replace('"', "\\\"")
+                    id.as_str()
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"")
+                        .replace('\n', "\\a ")
                 ));
                 break;
             }
