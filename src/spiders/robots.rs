@@ -78,12 +78,28 @@ impl RobotsTxtManager {
         Some((origin.clone(), origin))
     }
 
+    /// Parse a fetched robots.txt body into storable rules, without any
+    /// network I/O — the caller fetches through whatever client it wants
+    /// (the engine uses the spider's configured session, so robots.txt
+    /// requests honor the same proxy, TLS, and header settings as every
+    /// other request). Pass `None` when the fetch failed or returned a
+    /// non-2xx status: that yields allow-all rules, per convention.
+    pub fn parse_fetched(user_agent: &str, body: Option<&str>) -> FetchedRobots {
+        match body {
+            Some(text) => FetchedRobots(Self::parse_robots(text, user_agent)),
+            None => FetchedRobots(RobotsRules::allow_all()),
+        }
+    }
+
     /// Fetch and parse robots.txt for an origin without borrowing a manager.
     /// `origin` is either a full origin (`http://host:8080`) or a bare host,
     /// in which case `https://` is assumed. Uses a purpose-built HTTP client
-    /// with a short timeout so a hanging endpoint cannot block the caller
-    /// indefinitely. Unreachable or non-2xx robots.txt endpoints yield
-    /// allow-all rules.
+    /// with a short timeout — NOTE: this standalone helper does not apply
+    /// any [`FetcherConfig`](crate::fetchers::config::FetcherConfig)
+    /// settings (proxy, TLS, headers); the engine instead fetches
+    /// robots.txt through the spider's session and uses
+    /// [`Self::parse_fetched`]. Unreachable or non-2xx robots.txt endpoints
+    /// yield allow-all rules.
     pub async fn fetch_rules(user_agent: &str, origin: &str) -> FetchedRobots {
         let url = if origin.contains("://") {
             format!("{}/robots.txt", origin)

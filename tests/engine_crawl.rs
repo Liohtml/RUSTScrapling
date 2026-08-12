@@ -1031,3 +1031,116 @@ async fn on_error_receives_typed_session_error() {
         "on_error must receive SessionError::Network with a connect-classified FetcherError"
     );
 }
+
+/// Robots-obeying spider whose fetcher config carries a marker header.
+struct ConfiguredRobotsSpider {
+    urls: Vec<String>,
+}
+
+#[async_trait]
+impl Spider for ConfiguredRobotsSpider {
+    fn name(&self) -> &str {
+        "configured-robots-spider"
+    }
+    fn start_urls(&self) -> Vec<String> {
+        self.urls.clone()
+    }
+    fn robots_txt_obey(&self) -> bool {
+        true
+    }
+    fn concurrent_requests(&self) -> u32 {
+        1
+    }
+    fn fetcher_config(&self) -> FetcherConfig {
+        FetcherConfig::builder()
+            .header("x-robots-probe", "configured-session")
+            .build()
+    }
+
+    async fn parse(
+        &self,
+        response: SpiderResponse,
+    ) -> (Vec<serde_json::Value>, Vec<SpiderRequest>) {
+        (vec![serde_json::json!({ "url": response.url() })], vec![])
+    }
+}
+
+#[tokio::test]
+async fn robots_txt_is_fetched_through_the_configured_session() {
+    // Regression for issue #66: robots.txt used to be fetched by a bare
+    // side-channel reqwest client that ignored the spider's FetcherConfig —
+    // on a proxied crawl that leaked direct (unproxied) requests. The fetch
+    // now goes through the same session as every other request, so the
+    // config's headers (stand-in here for proxy/TLS settings, which all
+    // ride the same client) must appear on the robots.txt request.
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    // 2 requests: robots.txt (seed prefetch) + the one allowed page.
+    let server = tokio::spawn(async move {
+        let mut robots_request_head = String::new();
+        for _ in 0..2usize {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let mut head = Vec::new();
+            loop {
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buf[..n]);
+                if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head_text = String::from_utf8_lossy(&head).to_string();
+            let path = head_text
+                .lines()
+                .next()
+                .and_then(|l| l.split_whitespace().nth(1))
+                .unwrap_or("/")
+                .to_string();
+            let (content_type, body) = if path == "/robots.txt" {
+                robots_request_head = head_text.clone();
+                ("text/plain", "User-agent: *\nAllow: /\n".to_string())
+            } else {
+                ("text/html", "<html><body>ok</body></html>".to_string())
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                content_type,
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        }
+        robots_request_head
+    });
+
+    let spider = Arc::new(ConfiguredRobotsSpider {
+        urls: vec![format!("http://{}/page", addr)],
+    });
+    let engine = CrawlerEngine::new(
+        spider.clone(),
+        SessionManager::new(spider.fetcher_config()),
+        None,
+    )
+    .expect("engine builds");
+    let result = engine.crawl().await;
+
+    let robots_head = tokio::time::timeout(std::time::Duration::from_secs(30), server)
+        .await
+        .expect("server must see robots.txt and the page")
+        .unwrap();
+
+    assert_eq!(result.items.len(), 1);
+    assert!(
+        robots_head
+            .to_lowercase()
+            .contains("x-robots-probe: configured-session"),
+        "robots.txt must be fetched through the configured session; got:\n{robots_head}"
+    );
+}
