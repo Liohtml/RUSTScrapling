@@ -309,6 +309,15 @@ let names = page.css("div.product").css("h2.name");  // chain queries
 let all_text: Vec<_> = items.getall();
 ```
 
+Parsel-style `::text` and `::attr(name)` pseudo-elements extract values in
+one call instead of two:
+
+```rust
+let titles = page.css_getall("li.item::text");          // recursive text per match
+let hrefs  = page.css_getall("a.nav-link::attr(href)"); // attribute values
+let first  = page.css_get("h1::text");                  // first value only
+```
+
 ### Adaptive Selectors (survive redesigns)
 
 Save an element's "fingerprint" (tag, attributes, text, position, parent/sibling context) to SQLite. When the selector later stops matching — because the site changed — `relocate`/`css_adaptive` scores every element in the new page against the snapshot and returns the best match above a similarity threshold:
@@ -477,7 +486,12 @@ async fn main() {
     ).unwrap();
     let result = engine.crawl().await;
     println!("Scraped {} items", result.items.len());
+
+    // Export in any of four formats — heterogeneous item shapes survive
+    // CSV/XML (header = union of keys; nested values as JSON strings).
     result.items.to_jsonl(std::path::Path::new("products.jsonl")).unwrap();
+    result.items.to_csv(std::path::Path::new("products.csv")).unwrap();
+    result.items.to_xml(std::path::Path::new("products.xml")).unwrap();
 }
 ```
 
@@ -488,10 +502,33 @@ async fn main() {
 | `concurrent_requests()` | `4` | Global concurrency limit |
 | `concurrent_requests_per_domain()` | `0` | Per-domain limit (0 = disabled) |
 | `download_delay()` | `0.0` | Seconds between requests |
-| `robots_txt_obey()` | `false` | Respect robots.txt |
+| `robots_txt_obey()` | `false` | Respect robots.txt (Allow/Disallow with wildcards, Crawl-delay) |
 | `max_blocked_retries()` | `3` | Retry limit for blocked responses |
 | `allowed_domains()` | `{}` | Domain whitelist (empty = allow all) |
 | `development_mode()` | `false` | Cache responses to disk for dev iteration |
+| `autothrottle_enabled()` | `false` | Adaptive per-domain delays (see below) |
+| `autothrottle_start_delay()` | `5.0` | AutoThrottle initial delay in seconds |
+| `autothrottle_max_delay()` | `60.0` | AutoThrottle upper bound in seconds |
+| `autothrottle_target_concurrency()` | `1.0` | Desired in-flight requests per domain |
+
+#### AutoThrottle
+
+With `autothrottle_enabled()`, each domain gets an **adaptive delay driven
+by measured response latency**: fast healthy servers are crawled faster
+(down to `download_delay` / robots.txt `Crawl-delay` as floors), slow ones
+slower — and a `429`/`503` doubles the delay or honors the server's
+`Retry-After`, effective for the very next request. Requests to one domain
+are spaced by a per-domain reservation clock, so concurrent tasks queue
+behind each other instead of firing at once, and separate domains never
+delay each other.
+
+```rust
+impl Spider for MySpider {
+    // ...
+    fn autothrottle_enabled(&self) -> bool { true }
+    fn autothrottle_start_delay(&self) -> f64 { 1.0 }
+}
+```
 
 #### Spider Lifecycle Hooks
 
@@ -618,7 +655,8 @@ rust_scrapling/
     |-- result.rs                  # CrawlResult, CrawlStats, ItemList
     |-- scheduler.rs               # Priority queue with deduplication
     |-- session.rs                 # SessionManager: named HTTP sessions
-    |-- robots.rs                  # robots.txt compliance
+    |-- robots.rs                  # robots.txt compliance (RFC 9309 matching)
+    |-- throttle.rs                # AutoThrottle: adaptive per-domain delays
     |-- cache.rs                   # Dev-mode response caching
     +-- checkpoint.rs              # Pause/resume persistence (incl. dedup state)
 ```
@@ -635,7 +673,7 @@ rust_scrapling/
 ## Testing
 
 ```bash
-cargo test                     # 275+ tests, 3 network tests ignored
+cargo test                     # 340+ tests (incl. doctests), 3 network tests ignored
 cargo test -- --ignored        # include network tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt -- --check

@@ -85,7 +85,7 @@ When filing an issue, include:
 ## Areas Looking for Help
 
 - **Browser automation** -- Headless Chrome / Playwright integration
-- **Adaptive element relocation** -- Similarity scoring for finding moved elements
+- **MCP server** -- a ready-made Model Context Protocol wrapper around fetch/extract
 - **Performance benchmarks** -- Comparing against Python Scrapling and other Rust parsers
 - **XPath support** -- Full XPath query engine
 - **Documentation** -- More examples and tutorials
