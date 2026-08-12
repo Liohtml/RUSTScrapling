@@ -623,3 +623,53 @@ mod tests {
         assert!(mgr.is_allowed("https://unreachable.invalid/anything"));
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    //! Property-based verification of the hand-rolled wildcard matcher: for
+    //! every generated (pattern, target) pair, `pattern_matches` must agree
+    //! with a straightforward regex translation of the robots.txt pattern
+    //! grammar (`*` -> `.*`, trailing `$` -> end anchor, everything else
+    //! literal, implicit start anchor). The alphabets deliberately include
+    //! `*`/`$`/`.` in both roles and a multibyte character, covering the
+    //! anchored-last-fragment reservation, consecutive-star collapsing, and
+    //! byte-index slicing edge cases.
+
+    use super::pattern_matches;
+    use proptest::prelude::*;
+
+    fn regex_oracle(pattern: &str, target: &str) -> bool {
+        let (pat, anchored) = match pattern.strip_suffix('$') {
+            Some(p) => (p, true),
+            None => (pattern, false),
+        };
+        let mut re = String::from("^");
+        for c in pat.chars() {
+            if c == '*' {
+                re.push_str(".*");
+            } else {
+                re.push_str(&regex::escape(&c.to_string()));
+            }
+        }
+        if anchored {
+            re.push('$');
+        }
+        regex::Regex::new(&re)
+            .expect("oracle regex is valid by construction")
+            .is_match(target)
+    }
+
+    proptest! {
+        #[test]
+        fn wildcard_matcher_agrees_with_regex_oracle(
+            pattern in "[ab/*.$ä]{0,10}",
+            target in "[ab/.$ä]{0,14}",
+        ) {
+            prop_assert_eq!(
+                pattern_matches(&pattern, &target),
+                regex_oracle(&pattern, &target),
+                "pattern={:?} target={:?}", pattern, target
+            );
+        }
+    }
+}
