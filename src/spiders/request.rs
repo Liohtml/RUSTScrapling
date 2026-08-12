@@ -223,7 +223,7 @@ impl SpiderRequest {
             }
         }
 
-        format!("{:x}", hasher.finalize())
+        crate::core::hash::hex(&hasher.finalize())
     }
 
     /// Alias for [`Clone::clone`], mirroring upstream Scrapling's

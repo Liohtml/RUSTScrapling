@@ -114,7 +114,11 @@ impl SqliteStorage {
     fn get_hash(identifier: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(identifier.as_bytes());
-        format!("{:x}_{}", hasher.finalize(), identifier.len())
+        format!(
+            "{}_{}",
+            crate::core::hash::hex(&hasher.finalize()),
+            identifier.len()
+        )
     }
 }
 

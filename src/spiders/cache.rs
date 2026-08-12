@@ -80,7 +80,7 @@ impl ResponseCache {
     fn cache_path(&self, url: &str) -> PathBuf {
         let mut hasher = Sha256::new();
         hasher.update(url.as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
+        let hash = crate::core::hash::hex(&hasher.finalize());
         self.cache_dir.join(format!("{}.json", hash))
     }
 }
