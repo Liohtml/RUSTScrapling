@@ -20,7 +20,10 @@ change. Migration is mechanical; details below.
   `is_timeout()` / `is_connect()` / `transport_error()` support retry
   policies without digging into `reqwest`.
 - **`SessionError::Network` carries the typed `FetcherError`** instead of
-  a pre-rendered string (`Display` output is equivalent).
+  a pre-rendered string. The `network error:` prefix and structure are
+  unchanged, but the inner `FetcherError` messages are new — code
+  matching on full error strings (an anti-pattern the typed variants now
+  make unnecessary) will see different text.
 - **`Spider::on_error` receives `&SessionError`** instead of `&str`:
   hooks can now branch on failure class (timeout vs DNS vs body-size).
   Migration: change the signature; call `error.to_string()` to keep the

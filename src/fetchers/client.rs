@@ -47,7 +47,7 @@ pub enum FetcherError {
     /// The response body exceeded the configured size cap
     /// (`FetcherConfig::max_body_bytes`). Not retried — the same URL will
     /// exceed the cap again.
-    #[error("response body exceeds the {limit_bytes}-byte cap")]
+    #[error("response body{} exceeds the {limit_bytes}-byte cap", advertised_bytes.map(|b| format!(" (advertised {b} bytes)")).unwrap_or_default())]
     TooLarge {
         /// The configured cap.
         limit_bytes: usize,
@@ -66,11 +66,14 @@ pub enum FetcherError {
 
 impl FetcherError {
     /// The underlying transport error, when this error wraps one.
+    /// [`FetcherError::Http`] is excluded: it reports a client-BUILD
+    /// failure (e.g. TLS backend init), not something that happened on
+    /// the wire.
     #[must_use]
     pub fn transport_error(&self) -> Option<&reqwest::Error> {
         match self {
             FetcherError::ExhaustedRetries { source, .. } => Some(source),
-            FetcherError::BodyRead(e) | FetcherError::Http(e) => Some(e),
+            FetcherError::BodyRead(e) => Some(e),
             _ => None,
         }
     }
@@ -359,7 +362,7 @@ impl Fetcher {
         }
 
         Err(FetcherError::ExhaustedRetries {
-            attempts: self.config.retries + 1,
+            attempts: self.config.retries.saturating_add(1),
             source: last_error.expect("loop ran at least once, so a send error was recorded"),
         })
     }
