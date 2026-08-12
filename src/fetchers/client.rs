@@ -24,17 +24,74 @@ pub struct Fetcher {
 }
 
 /// Errors from building a [`Fetcher`] or performing a request.
+///
+/// Variants are typed (rather than stringified) so callers can build retry
+/// policies: a timeout or connect failure is worth retrying, a body-size
+/// violation is not. Marked `#[non_exhaustive]` so future variants are not
+/// a breaking change — match with a wildcard arm.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum FetcherError {
-    /// The request could not be completed: every retry attempt failed, the
-    /// response body exceeded the configured size cap, or a body chunk
-    /// could not be read. The message carries the underlying cause.
-    #[error("Request failed after retries: {0}")]
-    RequestFailed(String),
+    /// Every send attempt failed at the transport level (DNS, connect,
+    /// TLS, timeout, …). `source` is the LAST attempt's error; classify it
+    /// with [`FetcherError::is_timeout`] / [`FetcherError::is_connect`] or
+    /// inspect the [`reqwest::Error`] directly.
+    #[error("request failed after {attempts} attempt(s): {source}")]
+    ExhaustedRetries {
+        /// Total attempts made (initial try + retries).
+        attempts: u32,
+        /// The last attempt's transport error.
+        #[source]
+        source: reqwest::Error,
+    },
+    /// The response body exceeded the configured size cap
+    /// (`FetcherConfig::max_body_bytes`). Not retried — the same URL will
+    /// exceed the cap again.
+    #[error("response body{} exceeds the {limit_bytes}-byte cap", advertised_bytes.map(|b| format!(" (advertised {b} bytes)")).unwrap_or_default())]
+    TooLarge {
+        /// The configured cap.
+        limit_bytes: usize,
+        /// The server-advertised `Content-Length`, when the violation was
+        /// detected up front; `None` when the cap was hit mid-stream.
+        advertised_bytes: Option<u64>,
+    },
+    /// A body chunk could not be read after the response headers arrived.
+    #[error("body read failed: {0}")]
+    BodyRead(#[source] reqwest::Error),
     /// The underlying reqwest client failed to build (e.g. TLS backend
     /// initialization).
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
+}
+
+impl FetcherError {
+    /// The underlying transport error, when this error wraps one.
+    /// [`FetcherError::Http`] is excluded: it reports a client-BUILD
+    /// failure (e.g. TLS backend init), not something that happened on
+    /// the wire.
+    #[must_use]
+    pub fn transport_error(&self) -> Option<&reqwest::Error> {
+        match self {
+            FetcherError::ExhaustedRetries { source, .. } => Some(source),
+            FetcherError::BodyRead(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Whether the underlying failure was a timeout (worth retrying).
+    #[must_use]
+    pub fn is_timeout(&self) -> bool {
+        self.transport_error()
+            .is_some_and(reqwest::Error::is_timeout)
+    }
+
+    /// Whether the underlying failure was a connection failure (DNS,
+    /// refused, unreachable — often worth retrying or rotating a proxy).
+    #[must_use]
+    pub fn is_connect(&self) -> bool {
+        self.transport_error()
+            .is_some_and(reqwest::Error::is_connect)
+    }
 }
 
 impl Fetcher {
@@ -202,9 +259,10 @@ impl Fetcher {
             }
         }
 
-        let mut last_error = String::new();
+        let mut last_error: Option<reqwest::Error> = None;
 
         for attempt in 0..=self.config.retries {
+            let attempt_started = std::time::Instant::now();
             let mut req = self.next_client().request(method.clone(), url);
 
             // Set headers
@@ -248,10 +306,10 @@ impl Fetcher {
                             Err(_) => true,
                         };
                         if too_large {
-                            return Err(FetcherError::RequestFailed(format!(
-                                "response body too large: {} bytes (max {})",
-                                len, max_body
-                            )));
+                            return Err(FetcherError::TooLarge {
+                                limit_bytes: max_body,
+                                advertised_bytes: Some(len),
+                            });
                         }
                     }
 
@@ -265,34 +323,37 @@ impl Fetcher {
                             Ok(Some(chunk)) => {
                                 let new_len = bytes.len().checked_add(chunk.len());
                                 if new_len.map(|n| n > max_body).unwrap_or(true) {
-                                    return Err(FetcherError::RequestFailed(format!(
-                                        "response body exceeded {} bytes",
-                                        max_body
-                                    )));
+                                    return Err(FetcherError::TooLarge {
+                                        limit_bytes: max_body,
+                                        advertised_bytes: None,
+                                    });
                                 }
                                 bytes.extend_from_slice(&chunk);
                             }
                             Ok(None) => break,
                             Err(e) => {
-                                return Err(FetcherError::RequestFailed(format!(
-                                    "chunk read error: {}",
-                                    e
-                                )));
+                                return Err(FetcherError::BodyRead(e));
                             }
                         }
                     }
                     let body_text = crate::fetchers::encoding::decode_body(&bytes, &content_type);
 
-                    return Ok(Response::new(
+                    let mut response = Response::new(
                         status_code,
                         content_type,
                         body_text,
                         final_url,
                         resp_headers,
-                    ));
+                    );
+                    // Latency of THIS attempt only (send + body streaming),
+                    // excluding earlier failed attempts and retry sleeps —
+                    // AutoThrottle adapts to how the server actually
+                    // responded, not to how flaky the path there was.
+                    response.set_latency(attempt_started.elapsed());
+                    return Ok(response);
                 }
                 Err(e) => {
-                    last_error = e.to_string();
+                    last_error = Some(e);
                     if attempt < self.config.retries {
                         tokio::time::sleep(Duration::from_secs(self.config.retry_delay_secs)).await;
                     }
@@ -300,6 +361,9 @@ impl Fetcher {
             }
         }
 
-        Err(FetcherError::RequestFailed(last_error))
+        Err(FetcherError::ExhaustedRetries {
+            attempts: self.config.retries.saturating_add(1),
+            source: last_error.expect("loop ran at least once, so a send error was recorded"),
+        })
     }
 }

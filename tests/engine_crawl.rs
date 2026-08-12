@@ -965,3 +965,69 @@ async fn per_domain_and_per_session_stats_are_populated() {
         "requests without a session id count under \"default\""
     );
 }
+
+/// Spider recording the typed error its on_error hook receives.
+struct ErrorProbeSpider {
+    urls: Vec<String>,
+    saw_connect_error: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl Spider for ErrorProbeSpider {
+    fn name(&self) -> &str {
+        "error-probe-spider"
+    }
+    fn start_urls(&self) -> Vec<String> {
+        self.urls.clone()
+    }
+    fn fetcher_config(&self) -> FetcherConfig {
+        FetcherConfig::builder().retries(0).retry_delay(0).build()
+    }
+
+    async fn parse(
+        &self,
+        _response: SpiderResponse,
+    ) -> (Vec<serde_json::Value>, Vec<SpiderRequest>) {
+        (vec![], vec![])
+    }
+
+    async fn on_error(
+        &self,
+        _request: &SpiderRequest,
+        error: &rust_scrapling::spiders::session::SessionError,
+    ) {
+        // The hook receives the TYPED error, so retry policies can branch
+        // on failure class instead of parsing strings.
+        if let rust_scrapling::spiders::session::SessionError::Network(fetch_err) = error {
+            if fetch_err.is_connect() {
+                self.saw_connect_error
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn on_error_receives_typed_session_error() {
+    let saw = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let spider = Arc::new(ErrorProbeSpider {
+        // Port 1 refuses connections immediately.
+        urls: vec!["http://127.0.0.1:1/".to_string()],
+        saw_connect_error: saw.clone(),
+    });
+    // The engine builds sessions from the spider's fetcher_config through
+    // the SessionManager passed here.
+    let engine = CrawlerEngine::new(
+        spider.clone(),
+        SessionManager::new(spider.fetcher_config()),
+        None,
+    )
+    .expect("engine builds");
+    let result = engine.crawl().await;
+
+    assert_eq!(result.stats.failed_requests_count, 1);
+    assert!(
+        saw.load(std::sync::atomic::Ordering::SeqCst),
+        "on_error must receive SessionError::Network with a connect-classified FetcherError"
+    );
+}

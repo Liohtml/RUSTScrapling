@@ -68,7 +68,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rust_scrapling = "0.2"
+rust_scrapling = "0.3"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"          # items are serde_json::Value
 async-trait = "0.1"       # only needed when implementing the Spider trait

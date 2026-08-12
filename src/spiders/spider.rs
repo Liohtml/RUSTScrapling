@@ -5,6 +5,7 @@
 use crate::fetchers::config::FetcherConfig;
 use crate::spiders::request::SpiderRequest;
 use crate::spiders::response::SpiderResponse;
+use crate::spiders::session::SessionError;
 use async_trait::async_trait;
 use std::collections::HashSet;
 
@@ -132,7 +133,12 @@ pub trait Spider: Send + Sync + 'static {
     async fn on_close(&self) {}
     /// Called when a request fails at the network/session level (it does
     /// NOT fire for blocked responses — those go through the retry loop).
-    async fn on_error(&self, _request: &SpiderRequest, _error: &str) {}
+    /// The error is typed: match on
+    /// [`SessionError::Network`](crate::spiders::session::SessionError) and
+    /// the inner [`FetcherError`](crate::fetchers::client::FetcherError)
+    /// (or its `is_timeout()`/`is_connect()` helpers) to build re-enqueue
+    /// policies that retry transient failures but not permanent ones.
+    async fn on_error(&self, _request: &SpiderRequest, _error: &SessionError) {}
     /// Item pipeline hook: called for every item returned by
     /// [`Spider::parse`]. Return the (possibly transformed) item to keep
     /// it, or `None` to drop it (counted in `items_dropped`).

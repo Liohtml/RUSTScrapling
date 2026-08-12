@@ -12,6 +12,7 @@ use std::collections::HashMap;
 /// configuration error (wrong session name → not recoverable, abort) apart
 /// from a transient network failure (worth retrying).
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SessionError {
     /// The request named a session that was never added.
     #[error("session '{0}' not found")]
@@ -19,9 +20,13 @@ pub enum SessionError {
     /// The request's HTTP method is not one of GET/POST/PUT/DELETE.
     #[error("unsupported HTTP method: {0}")]
     UnsupportedMethod(String),
-    /// The fetch itself failed (after the fetcher's own retries).
+    /// The fetch itself failed (after the fetcher's own retries). Carries
+    /// the typed [`FetcherError`], so callers can distinguish timeouts,
+    /// connect failures, and body-size violations (e.g. in
+    /// [`Spider::on_error`](crate::spiders::spider::Spider::on_error)
+    /// retry policies).
     #[error("network error: {0}")]
-    Network(String),
+    Network(#[from] FetcherError),
 }
 
 /// A registry of named [`Fetcher`] sessions.
@@ -130,6 +135,6 @@ impl SessionManager {
             }
             m => return Err(SessionError::UnsupportedMethod(m.to_string())),
         };
-        result.map_err(|e| SessionError::Network(e.to_string()))
+        result.map_err(SessionError::Network)
     }
 }

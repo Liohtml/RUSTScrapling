@@ -231,3 +231,101 @@ async fn test_fetcher_delete() {
     assert!(response.is_ok());
     assert_eq!(response.unwrap().status(), 200);
 }
+
+#[tokio::test]
+async fn exhausted_retries_carries_typed_transport_error() {
+    use rust_scrapling::fetchers::client::FetcherError;
+
+    // Port 1 on localhost refuses connections immediately.
+    let config = FetcherConfig::builder().retries(1).retry_delay(0).build();
+    let fetcher = Fetcher::new(config).unwrap();
+    let err = fetcher
+        .get("http://127.0.0.1:1/")
+        .await
+        .expect_err("connection must fail");
+    match err {
+        FetcherError::ExhaustedRetries { attempts, .. } => {
+            assert_eq!(attempts, 2, "initial try + 1 retry");
+        }
+        other => panic!("expected ExhaustedRetries, got: {other:?}"),
+    }
+    assert!(
+        err.is_connect(),
+        "a refused connection classifies as connect"
+    );
+    assert!(!err.is_timeout());
+}
+
+#[tokio::test]
+async fn oversized_advertised_body_is_a_typed_too_large_error() {
+    use rust_scrapling::fetchers::client::FetcherError;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = socket.read(&mut buf).await;
+        // Advertise a body far beyond any sane cap; send nothing.
+        let response =
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 999999999999\r\nConnection: close\r\n\r\n";
+        let _ = socket.write_all(response.as_bytes()).await;
+        let _ = socket.shutdown().await;
+    });
+
+    let fetcher = Fetcher::new(FetcherConfig::default()).unwrap();
+    let err = fetcher
+        .get(&format!("http://{}/", addr))
+        .await
+        .expect_err("oversized body must be rejected");
+    server.await.unwrap();
+    match err {
+        FetcherError::TooLarge {
+            advertised_bytes, ..
+        } => assert_eq!(advertised_bytes, Some(999_999_999_999)),
+        other => panic!("expected TooLarge, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn live_responses_carry_fetch_latency() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = socket.read(&mut buf).await;
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        let body = "ok";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = socket.write_all(response.as_bytes()).await;
+        let _ = socket.shutdown().await;
+    });
+
+    let fetcher = Fetcher::new(FetcherConfig::default()).unwrap();
+    let response = fetcher.get(&format!("http://{}/", addr)).await.unwrap();
+    server.await.unwrap();
+    assert!(
+        response.latency() >= std::time::Duration::from_millis(100),
+        "latency must reflect the server's response time; got {:?}",
+        response.latency()
+    );
+    // Hand-assembled responses (and cache replays) report zero.
+    let synthetic = Response::new(
+        200,
+        String::new(),
+        String::new(),
+        String::new(),
+        HashMap::new(),
+    );
+    assert_eq!(synthetic.latency(), std::time::Duration::ZERO);
+}
