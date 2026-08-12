@@ -57,6 +57,20 @@ impl Drop for ActiveTaskGuard {
     }
 }
 
+/// Shared engine state, built once per crawl and cloned (one `Arc`) into
+/// every spawned request task — replaces what used to be eight separate
+/// `Arc` parameters threaded through `process_request`.
+struct EngineCtx<S: Spider> {
+    spider: Arc<S>,
+    session_manager: Arc<SessionManager>,
+    scheduler: Arc<Mutex<Scheduler>>,
+    stats: Arc<Mutex<CrawlStats>>,
+    items: Arc<Mutex<ItemList>>,
+    robots_manager: Option<Arc<Mutex<RobotsTxtManager>>>,
+    cache: Option<Arc<ResponseCache>>,
+    throttle: Option<Arc<std::sync::Mutex<AutoThrottle>>>,
+}
+
 /// Runs a [`Spider`] to completion (or until paused).
 ///
 /// The engine dequeues requests by priority and processes them
@@ -271,6 +285,18 @@ impl<S: Spider> CrawlerEngine<S> {
             }
         }
 
+        // One shared context per crawl; each task clones a single Arc.
+        let ctx = Arc::new(EngineCtx {
+            spider: self.spider.clone(),
+            session_manager: self.session_manager.clone(),
+            scheduler: self.scheduler.clone(),
+            stats: self.stats.clone(),
+            items: self.items.clone(),
+            robots_manager: self.robots_manager.clone(),
+            cache: self.cache.clone(),
+            throttle: self.throttle.clone(),
+        });
+
         // Main crawl loop
         loop {
             if self.paused.load(Ordering::SeqCst) {
@@ -350,14 +376,7 @@ impl<S: Spider> CrawlerEngine<S> {
 
                     self.active_tasks.fetch_add(1, Ordering::SeqCst);
 
-                    let spider = self.spider.clone();
-                    let session_manager = self.session_manager.clone();
-                    let scheduler = self.scheduler.clone();
-                    let stats = self.stats.clone();
-                    let items = self.items.clone();
-                    let robots_manager = self.robots_manager.clone();
-                    let cache = self.cache.clone();
-                    let throttle = self.throttle.clone();
+                    let ctx = ctx.clone();
                     let active_tasks = self.active_tasks.clone();
 
                     tokio::spawn(async move {
@@ -383,19 +402,7 @@ impl<S: Spider> CrawlerEngine<S> {
                             None => None,
                         };
 
-                        Self::process_request(
-                            spider,
-                            session_manager,
-                            scheduler,
-                            stats,
-                            items,
-                            robots_manager,
-                            cache,
-                            throttle,
-                            req,
-                            delay_was_skipped,
-                        )
-                        .await;
+                        Self::process_request(ctx, req, delay_was_skipped).await;
                     });
                 }
                 None => {
@@ -457,16 +464,8 @@ impl<S: Spider> CrawlerEngine<S> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn process_request(
-        spider: Arc<S>,
-        session_manager: Arc<SessionManager>,
-        scheduler: Arc<Mutex<Scheduler>>,
-        stats: Arc<Mutex<CrawlStats>>,
-        items: Arc<Mutex<ItemList>>,
-        robots_manager: Option<Arc<Mutex<RobotsTxtManager>>>,
-        cache: Option<Arc<ResponseCache>>,
-        throttle: Option<Arc<std::sync::Mutex<AutoThrottle>>>,
+        ctx: Arc<EngineCtx<S>>,
         request: SpiderRequest,
         // True when the dispatch loop skipped the download delay because
         // this URL appeared to be in the dev cache. If the entry then turns
@@ -474,6 +473,18 @@ impl<S: Spider> CrawlerEngine<S> {
         // path below owes the site that delay before fetching live.
         delay_was_skipped: bool,
     ) {
+        // Destructure by reference so the body reads the same as when these
+        // were individual parameters.
+        let EngineCtx {
+            spider,
+            session_manager,
+            scheduler,
+            stats,
+            items,
+            robots_manager,
+            cache,
+            throttle,
+        } = &*ctx;
         let url = request.url().to_string();
 
         // Check robots.txt. Lazily fetch robots.txt for domains discovered
@@ -550,8 +561,8 @@ impl<S: Spider> CrawlerEngine<S> {
 
                 // Parse and collect items
                 let (parsed_items, follow_requests) = spider.parse(spider_resp).await;
-                Self::collect_items(&spider, &items, &stats, parsed_items).await;
-                Self::enqueue_follow_requests(&scheduler, follow_requests).await;
+                Self::collect_items(spider, items, stats, parsed_items).await;
+                Self::enqueue_follow_requests(scheduler, follow_requests).await;
                 return;
             } else {
                 stats.lock().await.cache_misses += 1;
@@ -607,7 +618,6 @@ impl<S: Spider> CrawlerEngine<S> {
         }
 
         // Fetch via session_manager
-        let fetch_started = tokio::time::Instant::now();
         let result = session_manager.fetch(&request).await;
 
         match result {
@@ -616,7 +626,11 @@ impl<S: Spider> CrawlerEngine<S> {
                 let content_len = response.content_length() as u64;
 
                 if let Some(ref throttle) = throttle {
-                    let latency = fetch_started.elapsed().as_secs_f64();
+                    // Latency of the successful attempt only (stamped by the
+                    // fetcher) — earlier failed attempts and retry sleeps
+                    // would otherwise inflate the measurement and
+                    // over-throttle the domain on flaky connections.
+                    let latency = response.latency().as_secs_f64();
                     let retry_after = response
                         .headers()
                         .get("retry-after")
@@ -686,14 +700,14 @@ impl<S: Spider> CrawlerEngine<S> {
 
                 // Parse response
                 let (parsed_items, follow_requests) = spider.parse(spider_resp).await;
-                Self::collect_items(&spider, &items, &stats, parsed_items).await;
-                Self::enqueue_follow_requests(&scheduler, follow_requests).await;
+                Self::collect_items(spider, items, stats, parsed_items).await;
+                Self::enqueue_follow_requests(scheduler, follow_requests).await;
             }
             Err(err) => {
-                // Surface the typed SessionError as a string to the spider hook
-                // (NotFound vs Network vs UnsupportedMethod is preserved in the
-                // message; the typed error is available to direct fetch callers).
-                spider.on_error(&request, &err.to_string()).await;
+                // The typed SessionError reaches the spider hook directly, so
+                // retry policies can distinguish timeouts from DNS failures
+                // from body-size violations.
+                spider.on_error(&request, &err).await;
                 stats.lock().await.failed_requests_count += 1;
             }
         }

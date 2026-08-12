@@ -17,11 +17,13 @@ pub struct Response {
     body: String,
     url: String,
     headers: HashMap<String, String>,
+    latency: std::time::Duration,
 }
 
 impl Response {
     /// Assemble a response from its parts (used by the fetcher and by the
-    /// dev-mode cache when replaying stored responses).
+    /// dev-mode cache when replaying stored responses). Latency starts at
+    /// zero; the fetcher stamps the real value on live responses.
     pub fn new(
         status_code: u16,
         content_type: String,
@@ -35,7 +37,21 @@ impl Response {
             body,
             url,
             headers,
+            latency: std::time::Duration::ZERO,
         }
+    }
+
+    /// Wall-clock time of the successful fetch attempt (request sent until
+    /// the body finished streaming). Excludes earlier failed attempts and
+    /// retry sleeps. Zero for responses not produced by a live fetch (e.g.
+    /// dev-cache replays or hand-assembled responses).
+    #[must_use]
+    pub fn latency(&self) -> std::time::Duration {
+        self.latency
+    }
+
+    pub(crate) fn set_latency(&mut self, latency: std::time::Duration) {
+        self.latency = latency;
     }
 
     /// The HTTP status code (e.g. `200`).

@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-08-12
+
+Typed errors throughout the fetch path — the one long-planned breaking
+change. Migration is mechanical; details below.
+
+### Changed (breaking)
+
+- **`FetcherError` is now fully typed** (and `#[non_exhaustive]`):
+  `RequestFailed(String)` is replaced by
+  `ExhaustedRetries { attempts, source: reqwest::Error }`,
+  `TooLarge { limit_bytes, advertised_bytes }`, and
+  `BodyRead(reqwest::Error)`. Convenience classifiers
+  `is_timeout()` / `is_connect()` / `transport_error()` support retry
+  policies without digging into `reqwest`.
+- **`SessionError::Network` carries the typed `FetcherError`** instead of
+  a pre-rendered string (`Display` output is equivalent).
+- **`Spider::on_error` receives `&SessionError`** instead of `&str`:
+  hooks can now branch on failure class (timeout vs DNS vs body-size).
+  Migration: change the signature; call `error.to_string()` to keep the
+  old behavior.
+
+### Added
+
+- `Response::latency()`: wall-clock time of the successful fetch attempt
+  (zero for cache replays / hand-built responses). AutoThrottle now
+  adapts to this instead of a measurement that included the fetcher's
+  internal transport retries and sleeps — flaky connections no longer
+  over-throttle a healthy domain.
+
+### Internal
+
+- The engine's per-request state is bundled in one shared context (a
+  single `Arc` clone per task instead of eight).
+
 ## [0.2.3] - 2026-08-12
 
 Maintenance release: correctness quick-wins from a second-pass audit,
@@ -174,6 +208,7 @@ upstream Scrapling v0.4.8 through v0.4.11.
 - **CLI**: `fetch` and `extract` subcommands with CSS selector and format options
 - **175 tests** covering all modules
 
+[0.3.0]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.3.0
 [0.2.3]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.2.3
 [0.2.2]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.2.2
 [0.2.1]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.2.1
