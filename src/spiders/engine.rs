@@ -15,7 +15,7 @@ use crate::spiders::checkpoint::{CheckpointData, CheckpointManager};
 use crate::spiders::request::SpiderRequest;
 use crate::spiders::response::SpiderResponse;
 use crate::spiders::result::{CrawlResult, CrawlStats, ItemList};
-use crate::spiders::robots::RobotsTxtManager;
+use crate::spiders::robots::{FetchedRobots, RobotsTxtManager};
 use crate::spiders::scheduler::Scheduler;
 use crate::spiders::session::SessionManager;
 use crate::spiders::spider::Spider;
@@ -269,7 +269,12 @@ impl<S: Spider> CrawlerEngine<S> {
                         // process_request: fetch without holding the manager
                         // lock (uncontended here, but consistent).
                         let user_agent = robots.lock().await.user_agent().to_string();
-                        let rules = RobotsTxtManager::fetch_rules(&user_agent, &origin).await;
+                        let rules = Self::fetch_robots_via_session(
+                            &self.session_manager,
+                            &user_agent,
+                            &origin,
+                        )
+                        .await;
                         robots.lock().await.insert_rules(&key, rules);
                     }
                 }
@@ -464,6 +469,28 @@ impl<S: Spider> CrawlerEngine<S> {
         }
     }
 
+    /// Fetch `{origin}/robots.txt` through the spider's configured session,
+    /// so the request honors the same proxy, TLS, timeout, and header
+    /// settings as every other request this crawl makes — a bare side
+    /// channel would leak direct traffic on proxied crawls (#66). Fetch
+    /// failures and non-2xx responses yield allow-all rules, as before.
+    async fn fetch_robots_via_session(
+        session_manager: &SessionManager,
+        user_agent: &str,
+        origin: &str,
+    ) -> FetchedRobots {
+        let robots_url = format!("{}/robots.txt", origin);
+        match session_manager
+            .fetch(&SpiderRequest::new(&robots_url))
+            .await
+        {
+            Ok(response) if response.is_success() => {
+                RobotsTxtManager::parse_fetched(user_agent, Some(response.text()))
+            }
+            _ => RobotsTxtManager::parse_fetched(user_agent, None),
+        }
+    }
+
     async fn process_request(
         ctx: Arc<EngineCtx<S>>,
         request: SpiderRequest,
@@ -498,15 +525,16 @@ impl<S: Spider> CrawlerEngine<S> {
             // become allow-all. URLs without a host skip robots handling.
             if let Some((origin, key)) = RobotsTxtManager::origin_and_key(&url) {
                 // The network fetch runs WITHOUT holding the manager lock:
-                // holding it across the round-trip (up to the 10s robots
-                // timeout) would serialize every other task's is_allowed
-                // check behind this origin's fetch.
+                // holding it across the round-trip (up to the configured
+                // fetch timeout) would serialize every other task's
+                // is_allowed check behind this origin's fetch.
                 let (needs_fetch, user_agent) = {
                     let guard = robots.lock().await;
                     (!guard.has_domain(&key), guard.user_agent().to_string())
                 };
                 if needs_fetch {
-                    let rules = RobotsTxtManager::fetch_rules(&user_agent, &origin).await;
+                    let rules =
+                        Self::fetch_robots_via_session(session_manager, &user_agent, &origin).await;
                     let mut guard = robots.lock().await;
                     // Concurrent tasks may race to fetch the same origin;
                     // the first insert wins (they fetched the same content).
