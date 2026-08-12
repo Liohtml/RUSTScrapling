@@ -55,3 +55,6 @@ tempfile = "3"
 [dev-dependencies]
 # Tests run local TCP servers; the library itself needs no socket API.
 tokio = { version = "1", features = ["net", "io-util"] }
+# Property-based testing: the robots.txt wildcard matcher is verified
+# against a regex-translation oracle over generated patterns/targets.
+proptest = "1"
