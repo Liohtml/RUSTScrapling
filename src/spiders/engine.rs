@@ -296,7 +296,15 @@ impl<S: Spider> CrawlerEngine<S> {
                     // (download_delay still acts as its floor), so the
                     // dispatch loop never sleeps for one domain while others
                     // could be dispatched.
+                    // Sanitized like delay_floor in process_request:
+                    // Duration::from_secs_f64 panics on non-finite or
+                    // oversized input, and a Spider impl could return either.
                     let delay = self.spider.download_delay();
+                    let delay = if delay.is_finite() {
+                        delay.clamp(0.0, 86_400.0)
+                    } else {
+                        0.0
+                    };
                     let mut delay_was_skipped = false;
                     if delay > 0.0 && self.throttle.is_none() {
                         let served_from_cache = match &self.cache {

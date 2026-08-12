@@ -332,3 +332,30 @@ fn test_text_handlers_ref_iter() {
     let collected: Vec<&str> = (&handlers).into_iter().map(|t| t.as_str()).collect();
     assert_eq!(collected, vec!["a", "b"]);
 }
+
+#[test]
+fn test_clean_collapses_pathological_whitespace_runs_fast() {
+    // Regression: clean() used a `while contains("  ")` loop that re-scanned
+    // and reallocated per iteration — O(n²) on long space runs. 100k spaces
+    // must clean in far under a second (the old code took many seconds).
+    let s = format!("a{}b", " ".repeat(100_000));
+    let started = std::time::Instant::now();
+    let cleaned = TextHandler::new(&s).clean(false);
+    assert_eq!(cleaned.as_str(), "a b");
+    assert!(
+        started.elapsed().as_millis() < 500,
+        "clean() must be linear in input size; took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn test_clean_mixed_whitespace_semantics_preserved() {
+    // \r removed entirely (even mid-run), \t and \n become spaces, runs
+    // collapse, ends trimmed — exactly the old semantics.
+    let t = TextHandler::new("a \r b\t\t\tc\n\n\nd\r\n e  ");
+    assert_eq!(t.clean(false).as_str(), "a b c d e");
+    // Non-ASCII-space whitespace is untouched, as before.
+    let t = TextHandler::new("a\u{00a0}\u{00a0}b");
+    assert_eq!(t.clean(false).as_str(), "a\u{00a0}\u{00a0}b");
+}

@@ -8,7 +8,8 @@ use crate::parser::selector::Selector;
 ///
 /// Path segments use `:nth-of-type(n)` whenever an element shares its tag
 /// with siblings. If `full_path` is `false`, the path stops at the nearest
-/// ancestor with an `id` attribute (emitted as `#id`); if `true`, the
+/// ancestor with an `id` attribute (emitted as `[id="…"]`, valid for any
+/// id value); if `true`, the
 /// complete `>`-joined path from the root is generated.
 #[must_use]
 pub fn generate_css_selector(selector: &Selector, full_path: bool) -> String {
@@ -23,7 +24,18 @@ pub fn generate_css_selector(selector: &Selector, full_path: bool) -> String {
 
         if let Some(id) = el.attrib().get("id") {
             if !full_path {
-                parts.push(format!("#{}", id.as_str()));
+                // Attribute-selector form instead of `#id`: a raw `#id`
+                // requires the id to be a valid CSS identifier, so values
+                // containing `.`, `:`, or spaces would produce an invalid
+                // selector. `[id="…"]` is valid for any value once
+                // backslashes and quotes are escaped.
+                parts.push(format!(
+                    "[id=\"{}\"]",
+                    id.as_str()
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"")
+                        .replace('\n', "\\a ")
+                ));
                 break;
             }
         }
