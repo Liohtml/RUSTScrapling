@@ -17,16 +17,28 @@
 
 use crate::fetchers::response::Response;
 
+/// Whether a host is `duckduckgo.com` or one of its subdomains. An exact
+/// host comparison — unlike a URL substring check, this cannot be fooled by
+/// `evil.com/?ref=duckduckgo.com` or `duckduckgo.com.evil.com`.
+fn is_duckduckgo_host(host: &str) -> bool {
+    host == "duckduckgo.com" || host.ends_with(".duckduckgo.com")
+}
+
 /// Detect DuckDuckGo's soft-block, where it answers a search query with HTTP
 /// 202 and its homepage HTML rather than results — a case the generic
 /// [`Response::is_blocked`](crate::fetchers::response::Response::is_blocked)
 /// cannot catch because 202 is nominally a success code.
 ///
-/// Returns `false` for non-DuckDuckGo responses, so it is safe to call on any
-/// response.
+/// Returns `false` for non-DuckDuckGo responses (exact host comparison, so a
+/// URL that merely mentions duckduckgo.com is not treated as DuckDuckGo), so
+/// it is safe to call on any response.
 #[must_use]
 pub fn is_duckduckgo_blocked(response: &Response) -> bool {
-    if !response.url().contains("duckduckgo.com") {
+    let is_ddg = url::Url::parse(response.url())
+        .ok()
+        .and_then(|u| u.host_str().map(is_duckduckgo_host))
+        .unwrap_or(false);
+    if !is_ddg {
         return false;
     }
     // The documented soft-block signal: a 202 carrying the homepage.
@@ -53,11 +65,8 @@ pub fn decode_duckduckgo_href(href: &str) -> String {
     };
 
     if let Ok(parsed) = url::Url::parse(&full) {
-        let is_ddg_redirect = parsed
-            .host_str()
-            .map(|h| h.contains("duckduckgo.com"))
-            .unwrap_or(false)
-            && parsed.path() == "/l/";
+        let is_ddg_redirect =
+            parsed.host_str().map(is_duckduckgo_host).unwrap_or(false) && parsed.path() == "/l/";
         if is_ddg_redirect {
             if let Some((_, target)) = parsed.query_pairs().find(|(k, _)| k == "uddg") {
                 return target.into_owned();
@@ -137,5 +146,30 @@ mod tests {
     fn non_ddg_response_is_never_ddg_blocked() {
         let r = resp(202, "https://example.com", "");
         assert!(!is_duckduckgo_blocked(&r));
+    }
+    #[test]
+    fn url_substring_cannot_spoof_ddg_detection() {
+        // Regression: the check used to be a URL substring match, so ANY
+        // response whose URL merely mentioned duckduckgo.com (query param,
+        // path, or a hostile registrable domain) was treated as DuckDuckGo
+        // and could be misclassified as soft-blocked.
+        for url in [
+            "https://evil.com/?ref=duckduckgo.com",
+            "https://duckduckgo.com.evil.com/html/?q=x",
+            "https://example.com/duckduckgo.com/page",
+        ] {
+            let r = resp(202, url, "<html>home</html>");
+            assert!(
+                !is_duckduckgo_blocked(&r),
+                "{url} must not be treated as DuckDuckGo"
+            );
+        }
+        // Subdomains of the real host still are.
+        let r = resp(
+            202,
+            "https://html.duckduckgo.com/html/?q=x",
+            "<html></html>",
+        );
+        assert!(is_duckduckgo_blocked(&r));
     }
 }

@@ -1,6 +1,19 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use rust_scrapling::fetchers::client::Fetcher;
 use rust_scrapling::fetchers::config::FetcherConfig;
+
+/// Output format for the `fetch` subcommand. A ValueEnum so clap validates
+/// the value and lists the choices in --help, instead of silently treating
+/// any typo as "text".
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum OutputFormat {
+    /// Extracted text content
+    Text,
+    /// Raw HTML
+    Html,
+    /// JSON objects with tag/text/html per element
+    Json,
+}
 
 #[derive(Parser)]
 #[command(name = "rust-scrapling")]
@@ -17,8 +30,8 @@ enum Commands {
         url: String,
         #[arg(short, long)]
         selector: Option<String>,
-        #[arg(short, long, default_value = "text")]
-        format: String,
+        #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
+        format: OutputFormat,
         #[arg(long)]
         no_stealth: bool,
     },
@@ -56,9 +69,9 @@ async fn main() {
                         let sel = response.selector();
                         let results = sel.css(&css);
                         for item in &results {
-                            match format.as_str() {
-                                "html" => println!("{}", item.outer_html()),
-                                "json" => {
+                            match format {
+                                OutputFormat::Html => println!("{}", item.outer_html()),
+                                OutputFormat::Json => {
                                     let obj = serde_json::json!({
                                         "tag": item.tag(),
                                         "text": item.text().as_str(),
@@ -66,14 +79,14 @@ async fn main() {
                                     });
                                     println!("{}", serde_json::to_string_pretty(&obj).unwrap());
                                 }
-                                _ => println!("{}", item.text()),
+                                OutputFormat::Text => println!("{}", item.text()),
                             }
                         }
                         eprintln!("Found {} elements", results.len());
                     } else {
-                        match format.as_str() {
-                            "html" => println!("{}", response.text()),
-                            _ => {
+                        match format {
+                            OutputFormat::Html => println!("{}", response.text()),
+                            OutputFormat::Text | OutputFormat::Json => {
                                 let sel = response.selector();
                                 println!(
                                     "{}",

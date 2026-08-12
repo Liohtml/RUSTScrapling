@@ -23,7 +23,15 @@ pub fn generate_css_selector(selector: &Selector, full_path: bool) -> String {
 
         if let Some(id) = el.attrib().get("id") {
             if !full_path {
-                parts.push(format!("#{}", id.as_str()));
+                // Attribute-selector form instead of `#id`: a raw `#id`
+                // requires the id to be a valid CSS identifier, so values
+                // containing `.`, `:`, or spaces would produce an invalid
+                // selector. `[id="…"]` is valid for any value once
+                // backslashes and quotes are escaped.
+                parts.push(format!(
+                    "[id=\"{}\"]",
+                    id.as_str().replace('\\', "\\\\").replace('"', "\\\"")
+                ));
                 break;
             }
         }

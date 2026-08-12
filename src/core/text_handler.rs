@@ -105,13 +105,27 @@ impl TextHandler {
     /// is decoded afterwards.
     #[must_use]
     pub fn clean(&self, remove_entities: bool) -> TextHandler {
-        let mut s = self.value.replace('\t', " ");
-        s = s.replace('\r', "");
-        s = s.replace('\n', " ");
-        while s.contains("  ") {
-            s = s.replace("  ", " ");
+        // Single pass: the old `while contains("  ")` loop re-scanned and
+        // reallocated the whole string per iteration — O(n²) on
+        // pathological whitespace runs.
+        let mut s = String::with_capacity(self.value.len());
+        let mut last_was_space = false;
+        for c in self.value.chars() {
+            match c {
+                '\r' => {} // removed entirely
+                '\t' | '\n' | ' ' => {
+                    if !last_was_space {
+                        s.push(' ');
+                    }
+                    last_was_space = true;
+                }
+                c => {
+                    s.push(c);
+                    last_was_space = false;
+                }
+            }
         }
-        s = s.trim().to_string();
+        let mut s = s.trim().to_string();
         if remove_entities {
             s = decode_html_entities(&s);
         }

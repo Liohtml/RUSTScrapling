@@ -9,7 +9,38 @@ fn test_css_selector_with_id_stops_at_id() {
     let div = sel.css("#main");
     assert_eq!(div.len(), 1);
     let css = generate_css_selector(&div[0], false);
-    assert!(css.contains("#main"), "Expected '#main' in: {}", css);
+    assert!(
+        css.contains("[id=\"main\"]"),
+        "Expected attribute-form id selector in: {}",
+        css
+    );
+    // The generated selector must round-trip: running it selects the div.
+    assert_eq!(sel.css(&css).len(), 1);
+}
+
+#[test]
+fn css_selector_handles_ids_that_are_not_css_identifiers() {
+    // A raw `#foo.bar:baz` would be an invalid/misparsed selector (`.` and
+    // `:` are structural in CSS). The attribute form works for any value.
+    let html = r#"<html><body><div id="foo.bar:baz x">content</div></body></html>"#;
+    let sel = Selector::from_html(html);
+    let div = sel.css("div");
+    assert_eq!(div.len(), 1);
+    let css = generate_css_selector(&div[0], false);
+    assert_eq!(css, "[id=\"foo.bar:baz x\"]");
+    assert_eq!(
+        sel.css(&css).len(),
+        1,
+        "generated selector must be parseable and find the element"
+    );
+
+    // Quotes and backslashes in the id are escaped in the quoted string.
+    let html = r#"<html><body><div id='he said "hi"'>q</div></body></html>"#;
+    let sel = Selector::from_html(html);
+    let div = sel.css("div");
+    let css = generate_css_selector(&div[0], false);
+    assert_eq!(css, "[id=\"he said \\\"hi\\\"\"]");
+    assert_eq!(sel.css(&css).len(), 1);
 }
 
 #[test]
