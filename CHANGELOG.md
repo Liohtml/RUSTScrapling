@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-08-12
+
+Maintenance release: correctness quick-wins from a second-pass audit,
+dependency majors, and repository process hardening.
+
+### Changed
+
+- `generate_css_selector` now emits `[id="…"]` (escaped) instead of a raw
+  `#id`, so generated selectors are valid for ids containing `.`, `:`,
+  spaces, or quotes — note the output-format change if you snapshot
+  generated selectors
+- `TextHandler::clean` collapses whitespace in a single pass (was O(n²)
+  on pathological whitespace runs); semantics unchanged
+- CLI `--format` is a clap `ValueEnum` (`text`|`html`|`json`): typos are
+  rejected with the choices listed instead of silently meaning text
+- Dependencies: rusqlite 0.40, sha2 0.11 (digest hex encoding is
+  byte-identical, pinned by test — persisted fingerprints/cache keys are
+  unaffected), clap 4.6.5, log 0.4.33, async-trait 0.1.91
+
+### Fixed
+
+- DuckDuckGo block detection compared URL substrings, so
+  `evil.com/?ref=duckduckgo.com` or `duckduckgo.com.evil.com` were
+  treated as DuckDuckGo; now an exact host/subdomain comparison
+- A `Spider::download_delay()` returning a non-finite or absurdly large
+  value could panic the dispatch loop; sanitized like the robots
+  Crawl-delay floor
+
+### Internal
+
+- Property-based test verifies the robots.txt wildcard matcher against a
+  regex oracle (50k cases locally, fresh seeds every CI run)
+- CI: coverage report job (cargo-llvm-cov summary per run; baseline
+  85% lines / 91% functions), build caches for clippy/MSRV, prebuilt
+  cargo-audit (audit job now takes seconds)
+- SECURITY.md (private reporting via GitHub Security Advisories), issue
+  and PR templates; README documents AutoThrottle, CSV/XML export, and
+  `::text`/`::attr()`
+
 ## [0.2.2] - 2026-08-05
 
 Upstream v0.4.12 sync (AutoThrottle, CSV/XML export) plus the results of
@@ -135,6 +174,7 @@ upstream Scrapling v0.4.8 through v0.4.11.
 - **CLI**: `fetch` and `extract` subcommands with CSS selector and format options
 - **175 tests** covering all modules
 
+[0.2.3]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.2.3
 [0.2.2]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.2.2
 [0.2.1]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.2.0
