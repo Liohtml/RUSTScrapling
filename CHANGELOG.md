@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-08-17
+
+Feed spiders, ported from upstream Scrapling v0.4.13.
+
+### Added
+
+- **`XmlFeedSpider`**: iterate the nodes of RSS/Atom/product feeds.
+  Elements matching `iter_tag` (default `"item"`; use `"entry"` for
+  Atom) become items — by default an object mapping child element names
+  to their text, or whatever a custom `parse_node` callback returns.
+  HTML-void feed tags (`<link>`, `<meta>`) are rewritten before parsing
+  so their text survives html5ever; self-closing forms are expanded so
+  siblings are never swallowed. See the module docs for limitations
+  (XML namespaces, CDATA).
+- **`CsvFeedSpider`**: iterate CSV feed rows as header→cell objects.
+  RFC 4180 parsing (quoted fields, `""` escapes, embedded
+  delimiters/newlines, LF/CRLF), configurable delimiter, optional
+  `headers` override and `parse_row` callback.
+- **Transparent gzip bodies**: responses whose body carries the gzip
+  magic bytes (e.g. raw `.xml.gz` / `.csv.gz` feed and sitemap files
+  served without `Content-Encoding: gzip`) are decompressed before
+  charset decoding. Decompression is capped at the fetcher's configured
+  body-size limit, so a decompression bomb cannot bypass it; oversized
+  or corrupt gzip data falls back to the raw bytes (the previous
+  behavior). Concatenated multi-member gzip streams (pigz/bgzip) are
+  fully read. This also makes `SitemapSpider` handle `sitemap.xml.gz`.
+
+### Notes
+
+- Upstream v0.4.14 was evaluated: it is a Python-packaging-only fix and
+  does not apply to this crate.
+
 ## [0.3.0] - 2026-08-12
 
 Typed errors throughout the fetch path — the one long-planned breaking
@@ -211,6 +243,7 @@ upstream Scrapling v0.4.8 through v0.4.11.
 - **CLI**: `fetch` and `extract` subcommands with CSS selector and format options
 - **175 tests** covering all modules
 
+[0.3.1]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.3.0
 [0.2.3]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.2.3
 [0.2.2]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.2.2
