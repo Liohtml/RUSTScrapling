@@ -382,3 +382,102 @@ async fn content_page_mentioning_urlset_is_not_misclassified() {
     assert!(items.is_empty());
     assert_eq!(requests.len(), 1);
 }
+
+// ── Feed spiders (upstream v0.4.13) ──
+
+use rust_scrapling::spiders::spider::Spider as _;
+use rust_scrapling::spiders::templates::{CsvFeedSpider, XmlFeedSpider};
+
+fn feed_response(content_type: &str, body: &str) -> SpiderResponse {
+    SpiderResponse::new(Response::new(
+        200,
+        content_type.to_string(),
+        body.to_string(),
+        "https://feeds.example/feed".to_string(),
+        HashMap::new(),
+    ))
+}
+
+#[tokio::test]
+async fn xml_feed_default_converts_rss_items_to_objects() {
+    let rss = r#"<?xml version="1.0"?>
+<rss version="2.0"><channel>
+  <title>Chan</title>
+  <item><title>First</title><link>https://a.example/1</link><description>one &amp; only</description></item>
+  <item><title>Second</title><link>https://a.example/2</link><description>two</description></item>
+</channel></rss>"#;
+    let spider = XmlFeedSpider::builder("rss")
+        .feed_url("https://feeds.example/feed")
+        .build();
+    let (items, follow) = spider
+        .parse(feed_response("application/rss+xml", rss))
+        .await;
+
+    assert!(follow.is_empty(), "feeds are terminal");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["title"], "First");
+    assert_eq!(items[0]["link"], "https://a.example/1");
+    assert_eq!(items[0]["description"], "one & only");
+    assert_eq!(items[1]["title"], "Second");
+}
+
+#[tokio::test]
+async fn xml_feed_iter_tag_selects_atom_entries_and_callback_overrides() {
+    let atom = r#"<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><title>A1</title></entry>
+  <entry><title>A2</title></entry>
+</feed>"#;
+    let spider = XmlFeedSpider::builder("atom")
+        .feed_url("https://feeds.example/atom")
+        .iter_tag("entry")
+        .parse_node(Arc::new(|_resp, node| {
+            vec![serde_json::json!({
+                "custom": node.css_get("title::text").map(|t| t.as_str().to_string()),
+            })]
+        }))
+        .build();
+    let (items, _) = spider
+        .parse(feed_response("application/atom+xml", atom))
+        .await;
+
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["custom"], "A1");
+    assert_eq!(items[1]["custom"], "A2");
+}
+
+#[tokio::test]
+async fn csv_feed_first_row_is_header_and_rows_become_items() {
+    let csv = "name,price\r\nWidget,9.99\r\n\"Gadget, Large\",19.99\r\n";
+    let spider = CsvFeedSpider::builder("csv")
+        .feed_url("https://feeds.example/f.csv")
+        .build();
+    let (items, follow) = spider.parse(feed_response("text/csv", csv)).await;
+
+    assert!(follow.is_empty());
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["name"], "Widget");
+    assert_eq!(items[0]["price"], "9.99");
+    assert_eq!(items[1]["name"], "Gadget, Large");
+}
+
+#[tokio::test]
+async fn csv_feed_header_override_short_rows_and_custom_delimiter() {
+    let csv = "1;only-one-cell\n2;b;EXTRA\n";
+    let spider = CsvFeedSpider::builder("csv2")
+        .feed_url("https://feeds.example/f2.csv")
+        .delimiter(';')
+        .headers(["id".to_string(), "val".to_string()])
+        .parse_row(Arc::new(|_resp, row| {
+            vec![serde_json::json!({ "id": row["id"], "val": row["val"] })]
+        }))
+        .build();
+    let (items, _) = spider.parse(feed_response("text/csv", csv)).await;
+
+    // Header override: the first row is DATA. Extra cells dropped.
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["id"], "1");
+    assert_eq!(items[0]["val"], "only-one-cell");
+    assert_eq!(items[1]["id"], "2");
+    assert_eq!(items[1]["val"], "b");
+}

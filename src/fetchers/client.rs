@@ -336,7 +336,11 @@ impl Fetcher {
                             }
                         }
                     }
-                    let body_text = crate::fetchers::encoding::decode_body(&bytes, &content_type);
+                    let body_text = crate::fetchers::encoding::decode_body_capped(
+                        &bytes,
+                        &content_type,
+                        max_body,
+                    );
 
                     let mut response = Response::new(
                         status_code,

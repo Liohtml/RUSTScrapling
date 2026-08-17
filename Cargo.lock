@@ -1710,6 +1710,7 @@ dependencies = [
  "ego-tree",
  "encoding_rs",
  "env_logger",
+ "flate2",
  "indexmap",
  "log",
  "percent-encoding",
