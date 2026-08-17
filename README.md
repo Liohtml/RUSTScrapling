@@ -545,6 +545,22 @@ impl Spider for MySpider {
 > resume without re-visiting pages. For very large or open-ended crawls, set
 > `allowed_domains()` to bound scope.
 
+### Feed spiders (RSS/Atom/CSV)
+
+Iterate structured feeds without writing parsing code — each RSS `<item>`
+(or Atom `<entry>` via `iter_tag("entry")`) becomes an item object of its
+child elements, and each CSV row becomes a header-keyed object. Gzipped
+feed files (`.xml.gz`, `.csv.gz`) are decompressed transparently.
+
+```rust
+use rust_scrapling::XmlFeedSpider;
+
+let spider = XmlFeedSpider::builder("news")
+    .feed_url("https://example.com/rss.xml")
+    .build();
+// items: [{"title": "...", "link": "...", "description": "..."}, ...]
+```
+
 ### CrawlSpider, SitemapSpider & LinkExtractor
 
 For the common cases you don't need to implement `Spider` yourself:
@@ -649,7 +665,7 @@ rust_scrapling/
     |-- spider.rs                  # Spider trait (user-facing API)
     |-- engine.rs                  # CrawlerEngine: async orchestrator
     |-- links.rs                   # LinkExtractor: URL discovery primitive
-    |-- templates/                 # CrawlSpider + CrawlRule, SitemapSpider
+    |-- templates/                 # CrawlSpider, SitemapSpider, feed spiders, Shopify
     |-- request.rs                 # SpiderRequest: fingerprinting + priority
     |-- response.rs                # SpiderResponse: parser integration
     |-- result.rs                  # CrawlResult, CrawlStats, ItemList

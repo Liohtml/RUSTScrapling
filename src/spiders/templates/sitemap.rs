@@ -8,9 +8,9 @@
 //! other response is treated as a content page.
 //!
 //! Gzipped sitemaps: responses compressed at the transport level
-//! (`Content-Encoding: gzip`) are decompressed transparently by the HTTP
-//! client. Raw `.xml.gz` *files* are not supported because response bodies
-//! are stored as text.
+//! (`Content-Encoding: gzip`) are decompressed by the HTTP client, and raw
+//! `.xml.gz` *files* are decompressed transparently by the body decoder
+//! (gzip magic-byte detection), so both forms work.
 
 use crate::parser::Selector;
 use crate::spiders::links::LinkExtractor;

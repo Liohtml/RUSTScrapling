@@ -41,6 +41,9 @@ serde_json = { version = "1", features = ["preserve_order"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 regex = "1"
 encoding_rs = "0.8"
+# Transparent gzip decompression of .gz feed/sitemap bodies (pure-Rust
+# miniz_oxide backend by default).
+flate2 = "1"
 sha2 = "0.11"
 url = "2"
 percent-encoding = "2"

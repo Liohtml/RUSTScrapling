@@ -38,17 +38,59 @@ pub fn charset_from_content_type(content_type: &str) -> Option<&str> {
 /// byte-order mark in the body takes precedence over the header, matching
 /// the WHATWG encoding standard behaviour.
 ///
+/// Gzip-compressed bodies (detected by their magic bytes) are transparently
+/// decompressed first, with **no size cap** — call [`decode_body_capped`]
+/// to bound the decompressed size (the fetcher does, using its configured
+/// body-size limit).
+///
 /// `for_label_no_replacement` is used because the WHATWG spec maps a few
 /// legacy labels (`hz-gb-2312`, `iso-2022-kr`, …) to the *replacement*
 /// encoding, which decodes the entire body to a single U+FFFD — for a
 /// scraper, falling back to lossy UTF-8 preserves far more of the content.
 #[must_use]
 pub fn decode_body(bytes: &[u8], content_type: &str) -> String {
+    decode_body_capped(bytes, content_type, usize::MAX)
+}
+
+/// [`decode_body`] with a decompression cap: gzip-compressed bodies
+/// (detected by their `1f 8b` magic bytes — e.g. raw `.xml.gz` feed and
+/// sitemap files served without `Content-Encoding`) are transparently
+/// decompressed before charset decoding, matching upstream Scrapling's
+/// feed handling. `max_bytes` bounds the DECOMPRESSED size so a
+/// decompression bomb cannot bypass the fetcher's body-size cap; oversized
+/// or corrupt gzip data falls back to decoding the raw bytes as before.
+pub fn decode_body_capped(bytes: &[u8], content_type: &str, max_bytes: usize) -> String {
+    let effective: std::borrow::Cow<'_, [u8]> = match gunzip_capped(bytes, max_bytes) {
+        Some(decompressed) => std::borrow::Cow::Owned(decompressed),
+        None => std::borrow::Cow::Borrowed(bytes),
+    };
     let encoding = charset_from_content_type(content_type)
         .and_then(|label| encoding_rs::Encoding::for_label_no_replacement(label.as_bytes()))
         .unwrap_or(encoding_rs::UTF_8);
-    let (text, _, _) = encoding.decode(bytes);
+    let (text, _, _) = encoding.decode(&effective);
     text.into_owned()
+}
+
+/// Decompress `bytes` when they carry the gzip magic; `None` when they are
+/// not gzip, are corrupt, or would decompress beyond `max_bytes`.
+fn gunzip_capped(bytes: &[u8], max_bytes: usize) -> Option<Vec<u8>> {
+    use std::io::Read;
+
+    if bytes.len() < 2 || bytes[0] != 0x1f || bytes[1] != 0x8b {
+        return None;
+    }
+    let mut out = Vec::new();
+    let limit = max_bytes as u64;
+    // MultiGzDecoder reads ALL members of a concatenated gzip stream
+    // (pigz/bgzip/log-rotation output), matching gzip(1) and Python's
+    // GzipFile; the single-member GzDecoder would silently truncate.
+    let mut reader = flate2::read::MultiGzDecoder::new(bytes).take(limit.saturating_add(1));
+    match reader.read_to_end(&mut out) {
+        Ok(_) if out.len() as u64 <= limit => Some(out),
+        // Oversized (bomb) or corrupt: keep the raw bytes, exactly the
+        // pre-gzip-support behavior.
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -190,5 +232,63 @@ mod tests {
         let mut bytes = vec![0xef, 0xbb, 0xbf];
         bytes.extend_from_slice("café".as_bytes());
         assert_eq!(decode_body(&bytes, "text/html; charset=ISO-8859-1"), "café");
+    }
+    #[test]
+    fn gzip_bodies_are_transparently_decompressed() {
+        use std::io::Write;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all("<rss><item><title>hi</title></item></rss>".as_bytes())
+            .unwrap();
+        let gz = enc.finish().unwrap();
+        assert_eq!(
+            decode_body_capped(&gz, "application/gzip", 1024 * 1024),
+            "<rss><item><title>hi</title></item></rss>"
+        );
+    }
+
+    #[test]
+    fn multi_member_gzip_is_fully_decompressed() {
+        use std::io::Write;
+        // Concatenated gzip members (as produced by pigz, bgzip, or
+        // `cat a.gz b.gz`) must all be read, not just the first.
+        let mut gz = Vec::new();
+        for part in ["first ", "second"] {
+            let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            enc.write_all(part.as_bytes()).unwrap();
+            gz.extend(enc.finish().unwrap());
+        }
+        assert_eq!(
+            decode_body_capped(&gz, "application/gzip", 1024),
+            "first second"
+        );
+    }
+
+    #[test]
+    fn gzip_bomb_falls_back_to_raw_bytes() {
+        use std::io::Write;
+        // 1 MiB of zeros compresses to ~1 KiB; cap the decompressed size
+        // below 1 MiB so the bomb guard trips and the raw (compressed)
+        // bytes are decoded instead — the pre-gzip behavior.
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&vec![0u8; 1024 * 1024]).unwrap();
+        let gz = enc.finish().unwrap();
+        let out = decode_body_capped(&gz, "application/gzip", 64 * 1024);
+        assert!(
+            out.len() < 1024 * 1024,
+            "bomb must not be fully decompressed"
+        );
+    }
+
+    #[test]
+    fn corrupt_gzip_falls_back_to_raw_bytes() {
+        // Valid magic, garbage stream.
+        let fake = [0x1f, 0x8b, b'n', b'o', b't', b'g', b'z'];
+        let out = decode_body_capped(&fake, "text/plain", 1024);
+        assert!(!out.is_empty(), "raw-bytes fallback must decode something");
+    }
+
+    #[test]
+    fn non_gzip_bodies_are_untouched() {
+        assert_eq!(decode_body_capped(b"hello", "text/plain", 10), "hello");
     }
 }

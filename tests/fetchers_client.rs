@@ -329,3 +329,45 @@ async fn live_responses_carry_fetch_latency() {
     );
     assert_eq!(synthetic.latency(), std::time::Duration::ZERO);
 }
+
+#[tokio::test]
+async fn gzip_file_bodies_are_transparently_decompressed() {
+    // A raw .xml.gz FILE served without Content-Encoding (so reqwest's
+    // transport decompression does not apply) must still arrive as text:
+    // the body decoder detects the gzip magic bytes.
+    use std::io::Write as _;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(b"<rss><item><title>gz</title></item></rss>")
+        .unwrap();
+    let gz = enc.finish().unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = socket.read(&mut buf).await;
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            gz.len()
+        );
+        let _ = socket.write_all(header.as_bytes()).await;
+        let _ = socket.write_all(&gz).await;
+        let _ = socket.shutdown().await;
+    });
+
+    let fetcher = Fetcher::new(FetcherConfig::default()).unwrap();
+    let response = fetcher
+        .get(&format!("http://{}/feed.xml.gz", addr))
+        .await
+        .unwrap();
+    server.await.unwrap();
+    assert_eq!(
+        response.text(),
+        "<rss><item><title>gz</title></item></rss>",
+        "gzip file bodies must be transparently decompressed"
+    );
+}
