@@ -38,6 +38,11 @@ pub fn charset_from_content_type(content_type: &str) -> Option<&str> {
 /// byte-order mark in the body takes precedence over the header, matching
 /// the WHATWG encoding standard behaviour.
 ///
+/// Gzip-compressed bodies (detected by their magic bytes) are transparently
+/// decompressed first, with **no size cap** — call [`decode_body_capped`]
+/// to bound the decompressed size (the fetcher does, using its configured
+/// body-size limit).
+///
 /// `for_label_no_replacement` is used because the WHATWG spec maps a few
 /// legacy labels (`hz-gb-2312`, `iso-2022-kr`, …) to the *replacement*
 /// encoding, which decodes the entire body to a single U+FFFD — for a
@@ -76,7 +81,10 @@ fn gunzip_capped(bytes: &[u8], max_bytes: usize) -> Option<Vec<u8>> {
     }
     let mut out = Vec::new();
     let limit = max_bytes as u64;
-    let mut reader = flate2::read::GzDecoder::new(bytes).take(limit.saturating_add(1));
+    // MultiGzDecoder reads ALL members of a concatenated gzip stream
+    // (pigz/bgzip/log-rotation output), matching gzip(1) and Python's
+    // GzipFile; the single-member GzDecoder would silently truncate.
+    let mut reader = flate2::read::MultiGzDecoder::new(bytes).take(limit.saturating_add(1));
     match reader.read_to_end(&mut out) {
         Ok(_) if out.len() as u64 <= limit => Some(out),
         // Oversized (bomb) or corrupt: keep the raw bytes, exactly the
@@ -235,6 +243,23 @@ mod tests {
         assert_eq!(
             decode_body_capped(&gz, "application/gzip", 1024 * 1024),
             "<rss><item><title>hi</title></item></rss>"
+        );
+    }
+
+    #[test]
+    fn multi_member_gzip_is_fully_decompressed() {
+        use std::io::Write;
+        // Concatenated gzip members (as produced by pigz, bgzip, or
+        // `cat a.gz b.gz`) must all be read, not just the first.
+        let mut gz = Vec::new();
+        for part in ["first ", "second"] {
+            let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            enc.write_all(part.as_bytes()).unwrap();
+            gz.extend(enc.finish().unwrap());
+        }
+        assert_eq!(
+            decode_body_capped(&gz, "application/gzip", 1024),
+            "first second"
         );
     }
 

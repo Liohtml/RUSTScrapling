@@ -28,6 +28,18 @@ pub type ParseNodeFn =
 /// (`<title>X</title>` → `"title": "X"`); when a child tag repeats, the
 /// last occurrence wins. Feeds are terminal: no follow-up requests are
 /// generated.
+///
+/// # Limitations
+///
+/// Feeds are parsed with the HTML parser, not a real XML parser:
+///
+/// - **XML namespaces** are not understood. Namespaced child tags show up
+///   literally as keys (`<g:price>` → `"g:price"`), but a namespaced
+///   `iter_tag` such as `"media:content"` cannot be used — the `:` is
+///   parsed as a CSS pseudo-class and the selector matches nothing.
+/// - **CDATA sections** (`<![CDATA[...]]>`) are not supported and their
+///   content may be truncated or mangled; feeds that wrap descriptions in
+///   CDATA will lose markup-heavy text.
 pub struct XmlFeedSpider {
     name: String,
     feed_urls: Vec<String>,
@@ -53,7 +65,10 @@ impl XmlFeedSpider {
 
     /// Rewrite XML tags that HTML parsing would mangle (HTML void elements
     /// like `<link>` cannot have children, so their text would be lost).
-    /// Case-insensitive, whole-tag-name matches only.
+    /// Case-insensitive, whole-tag-name matches only. Self-closing forms
+    /// (`<link .../>`) are expanded to an explicit end tag because html5ever
+    /// ignores the self-closing flag on unknown elements — the rewritten tag
+    /// would stay open and swallow every following sibling.
     fn rewrite_void_tags(body: &str) -> String {
         let mut out = String::with_capacity(body.len());
         let bytes = body.as_bytes();
@@ -71,16 +86,60 @@ impl XmlFeedSpider {
                     let name_matches = body
                         .get(start..end)
                         .is_some_and(|s| s.eq_ignore_ascii_case(from));
-                    let boundary_ok =
-                        matches!(next, Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'/'))
-                            || (closing && next.is_none());
+                    // XML `S` after a tag name: space, tab, CR, LF.
+                    let boundary_ok = matches!(
+                        next,
+                        Some(b'>')
+                            | Some(b' ')
+                            | Some(b'\t')
+                            | Some(b'\r')
+                            | Some(b'\n')
+                            | Some(b'/')
+                    ) || (closing && next.is_none());
                     if name_matches && boundary_ok {
-                        out.push('<');
                         if closing {
-                            out.push('/');
+                            out.push_str("</");
+                            out.push_str(to);
+                            i = end;
+                            continue 'outer;
                         }
+                        // Find the unquoted `>` ending this tag; XML
+                        // attribute values may legally contain `>`.
+                        let mut j = end;
+                        let mut quote: Option<u8> = None;
+                        let gt = loop {
+                            match bytes.get(j) {
+                                None => break None,
+                                Some(&b) => match quote {
+                                    Some(q) if b == q => quote = None,
+                                    Some(_) => {}
+                                    None => match b {
+                                        b'"' | b'\'' => quote = Some(b),
+                                        b'>' => break Some(j),
+                                        _ => {}
+                                    },
+                                },
+                            }
+                            j += 1;
+                        };
+                        out.push('<');
                         out.push_str(to);
-                        i = end;
+                        match gt {
+                            Some(gt) if bytes[gt - 1] == b'/' => {
+                                // Self-closing: emit an explicit end tag.
+                                out.push_str(&body[end..gt - 1]);
+                                out.push_str("></");
+                                out.push_str(to);
+                                out.push('>');
+                                i = gt + 1;
+                            }
+                            Some(gt) => {
+                                out.push_str(&body[end..=gt]);
+                                i = gt + 1;
+                            }
+                            // Truncated tag at EOF: copy the rest verbatim.
+                            None => i = end,
+                        }
                         continue 'outer;
                     }
                 }
@@ -244,5 +303,62 @@ impl XmlFeedSpiderBuilder {
     /// Finish building the spider.
     pub fn build(self) -> XmlFeedSpider {
         self.spider
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::XmlFeedSpider;
+    use crate::parser::Selector;
+
+    #[test]
+    fn self_closing_link_does_not_swallow_siblings() {
+        // html5ever ignores the self-closing flag on unknown elements; the
+        // rewriter must emit an explicit end tag or `id`/`updated` would
+        // become children of `xmlfeed-link` and vanish from the item.
+        let body = r#"<feed><entry><title>A1</title><link href="https://a/1"/><id>urn:1</id><updated>2020</updated></entry></feed>"#;
+        let rewritten = XmlFeedSpider::rewrite_void_tags(body);
+        assert!(rewritten.contains(r#"<xmlfeed-link href="https://a/1"></xmlfeed-link>"#));
+        let selector = Selector::from_html(&rewritten);
+        let entries = selector.css("entry");
+        let item = XmlFeedSpider::node_to_item(&entries[0]);
+        let obj = item.as_object().unwrap();
+        assert_eq!(obj.get("title").unwrap(), "A1");
+        assert_eq!(obj.get("id").unwrap(), "urn:1");
+        assert_eq!(obj.get("updated").unwrap(), "2020");
+        assert_eq!(obj.get("link").unwrap(), "");
+    }
+
+    #[test]
+    fn newline_after_tag_name_is_a_boundary() {
+        // Pretty-printers wrap attributes: `<link\n>` is valid XML `S`.
+        let rewritten = XmlFeedSpider::rewrite_void_tags("<link\n>https://a/1</link>");
+        assert_eq!(rewritten, "<xmlfeed-link\n>https://a/1</xmlfeed-link>");
+        let rewritten = XmlFeedSpider::rewrite_void_tags("<link\r\n href=\"x\">t</link>");
+        assert_eq!(rewritten, "<xmlfeed-link\r\n href=\"x\">t</xmlfeed-link>");
+    }
+
+    #[test]
+    fn gt_inside_quoted_attribute_does_not_end_the_tag() {
+        // `>` is legal inside XML attribute values.
+        let rewritten = XmlFeedSpider::rewrite_void_tags(r#"<link title="a>b"/><id>1</id>"#);
+        assert_eq!(
+            rewritten,
+            r#"<xmlfeed-link title="a>b"></xmlfeed-link><id>1</id>"#
+        );
+    }
+
+    #[test]
+    fn non_matching_and_truncated_tags_pass_through() {
+        assert_eq!(
+            XmlFeedSpider::rewrite_void_tags("<linkage>x</linkage>"),
+            "<linkage>x</linkage>"
+        );
+        // Truncated tag at EOF: copied verbatim after the rewritten name.
+        assert_eq!(
+            XmlFeedSpider::rewrite_void_tags("<link href=\"x"),
+            "<xmlfeed-link href=\"x"
+        );
+        assert_eq!(XmlFeedSpider::rewrite_void_tags("</link"), "</xmlfeed-link");
     }
 }

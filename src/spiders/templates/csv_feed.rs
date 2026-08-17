@@ -59,9 +59,9 @@ fn parse_csv(text: &str, delimiter: char) -> Vec<Vec<String>> {
     let mut field = String::new();
     let mut in_quotes = false;
     let mut chars = text.chars().peekable();
-    // Tracks whether the current row has any content at all, so a trailing
-    // newline doesn't produce a phantom ["" ] row while a genuinely empty
-    // line mid-file still does.
+    // Tracks whether the current row has any content at all, so neither a
+    // trailing newline nor a blank line mid-file produces a phantom [""]
+    // row (Python's csv module likewise yields nothing for blank lines).
     let mut row_started = false;
 
     while let Some(c) = chars.next() {
@@ -281,6 +281,14 @@ mod tests {
         assert_eq!(
             parse_csv("a,b\n1,2", ','),
             vec![vec!["a", "b"], vec!["1", "2"]]
+        );
+    }
+
+    #[test]
+    fn blank_lines_are_skipped() {
+        assert_eq!(
+            parse_csv("a,b\n\n1,2\n\r\n3,4\n", ','),
+            vec![vec!["a", "b"], vec!["1", "2"], vec!["3", "4"]]
         );
     }
 
