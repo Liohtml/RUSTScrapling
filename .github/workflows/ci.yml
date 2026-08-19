@@ -107,7 +107,7 @@ jobs:
       # Prebuilt binary in seconds — `cargo install cargo-audit` compiled it
       # from source on every run (~minutes, uncached).
       - name: Install cargo-audit
-        uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d # v2.85.12
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
         with:
           tool: cargo-audit
       - name: Audit dependencies for known vulnerabilities
@@ -123,7 +123,7 @@ jobs:
           toolchain: stable
           components: llvm-tools-preview
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d # v2.85.12
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
         with:
           tool: cargo-llvm-cov
       - name: Cache cargo registry & build
