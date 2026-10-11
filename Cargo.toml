@@ -2,13 +2,13 @@
 name = "rust_scrapling"
 version = "0.4.0"
 edition = "2021"
-description = "A Rust port of Scrapling - modern web scraping framework with CSS selectors, async HTTP, and spider-based crawling"
+description = "Modern web scraping: spiders, CSS selectors, robots.txt/AutoThrottle politeness, and LLM/RAG-ready Markdown extraction - a Rust port of Scrapling"
 authors = ["Liohtml"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Liohtml/RUSTScrapling"
 documentation = "https://docs.rs/rust_scrapling"
 homepage = "https://github.com/Liohtml/RUSTScrapling"
-keywords = ["scraping", "web-scraping", "html-parser", "css-selectors", "crawler"]
+keywords = ["scraping", "web-scraping", "crawler", "rag", "llm"]
 categories = ["web-programming", "parser-implementations", "command-line-utilities"]
 readme = "README.md"
 # Real MSRV: the dependency tree (cookie_store, time, icu_*) requires 1.88,
