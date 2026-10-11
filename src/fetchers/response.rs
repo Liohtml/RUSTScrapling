@@ -107,6 +107,41 @@ impl Response {
         serde_json::from_str(&self.body)
     }
 
+    /// Convert the response content to clean, LLM-ready Markdown.
+    ///
+    /// Scripts, styles, and hidden / prompt-injection content are always
+    /// removed before conversion; see the
+    /// [`markdown`](crate::parser::markdown) module docs for details.
+    ///
+    /// With `css_selector`, only the matching elements are converted and
+    /// the results concatenated. With `main_content_only`, only the content
+    /// inside the page's `<body>` tag is converted.
+    #[must_use]
+    pub fn markdown(&self, css_selector: Option<&str>, main_content_only: bool) -> String {
+        let root = self.selector();
+        let page = if main_content_only {
+            root.css("body").into_iter().next().unwrap_or(root)
+        } else {
+            root
+        };
+        match css_selector {
+            None => page.markdown().to_string(),
+            Some(sel) => {
+                // Matches sitting inside hidden/noise ancestors are
+                // rejected: converting such a subtree from its own root
+                // would resurrect content the sanitizer guarantees to
+                // strip (upstream drops hidden subtrees before selecting).
+                let parts: Vec<String> = page
+                    .css(sel)
+                    .into_iter()
+                    .filter(|el| !crate::parser::markdown::in_hidden_context(el))
+                    .map(|el| el.markdown().to_string())
+                    .collect();
+                parts.join("\n")
+            }
+        }
+    }
+
     /// Whether the status code is 2xx.
     #[must_use]
     pub fn is_success(&self) -> bool {

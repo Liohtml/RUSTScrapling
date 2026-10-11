@@ -3,11 +3,13 @@
 pub mod crawler;
 pub mod csv_feed;
 pub mod shopify;
+pub mod site_to_markdown;
 pub mod sitemap;
 pub mod xml_feed;
 
 pub use crawler::{CrawlRule, CrawlSpider};
 pub use csv_feed::CsvFeedSpider;
 pub use shopify::ShopifySpider;
+pub use site_to_markdown::SiteToMarkdownSpider;
 pub use sitemap::SitemapSpider;
 pub use xml_feed::XmlFeedSpider;

@@ -561,6 +561,27 @@ let spider = XmlFeedSpider::builder("news")
 // items: [{"title": "...", "link": "...", "description": "..."}, ...]
 ```
 
+### Site → Markdown (RAG/LLM ingestion)
+
+Crawl a website and convert every page to clean, LLM-ready Markdown —
+scripts, styles, and hidden / prompt-injection content (CSS-hidden
+elements, `aria-hidden`, zero-width characters) are always stripped:
+
+```rust
+use rust_scrapling::SiteToMarkdownSpider;
+
+let spider = SiteToMarkdownSpider::builder("docs-to-md")
+    .start_url("https://example.com/docs/")
+    .allowed_domains(["example.com".to_string()])  // required: bounds the crawl
+    .output_dir("md-out")                          // optional: one .md file per page
+    .max_pages(500)
+    .build();
+// items: [{"url": "...", "title": "...", "markdown": "# ..."}, ...]
+```
+
+The conversion is also available standalone on every response and selector:
+`response.markdown(None, true)` / `selector.markdown()`.
+
 ### CrawlSpider, SitemapSpider & LinkExtractor
 
 For the common cases you don't need to implement `Spider` yourself:
@@ -665,7 +686,7 @@ rust_scrapling/
     |-- spider.rs                  # Spider trait (user-facing API)
     |-- engine.rs                  # CrawlerEngine: async orchestrator
     |-- links.rs                   # LinkExtractor: URL discovery primitive
-    |-- templates/                 # CrawlSpider, SitemapSpider, feed spiders, Shopify
+    |-- templates/                 # CrawlSpider, SitemapSpider, feed spiders, site-to-Markdown, Shopify
     |-- request.rs                 # SpiderRequest: fingerprinting + priority
     |-- response.rs                # SpiderResponse: parser integration
     |-- result.rs                  # CrawlResult, CrawlStats, ItemList

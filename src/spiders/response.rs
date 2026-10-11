@@ -72,6 +72,13 @@ impl SpiderResponse {
         self.selector().css_get(query)
     }
 
+    /// Convert the response content to clean, LLM-ready Markdown; see
+    /// [`Response::markdown`](crate::fetchers::response::Response::markdown).
+    #[must_use]
+    pub fn markdown(&self, css_selector: Option<&str>, main_content_only: bool) -> String {
+        self.inner.markdown(css_selector, main_content_only)
+    }
+
     /// Parse the body as JSON.
     pub fn json(&self) -> Result<serde_json::Value, serde_json::Error> {
         self.inner.json()

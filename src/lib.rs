@@ -159,5 +159,6 @@ pub use spiders::result::{CrawlResult, CrawlStats, ItemList};
 pub use spiders::session::{SessionError, SessionManager};
 pub use spiders::spider::Spider;
 pub use spiders::templates::{
-    CrawlRule, CrawlSpider, CsvFeedSpider, ShopifySpider, SitemapSpider, XmlFeedSpider,
+    CrawlRule, CrawlSpider, CsvFeedSpider, ShopifySpider, SiteToMarkdownSpider, SitemapSpider,
+    XmlFeedSpider,
 };

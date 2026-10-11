@@ -3,6 +3,7 @@
 //! element relocation.
 
 pub mod adaptive;
+pub mod markdown;
 pub mod selector;
 pub mod selector_generation;
 pub mod selectors;
