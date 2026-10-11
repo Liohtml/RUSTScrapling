@@ -111,13 +111,23 @@ impl Spider for SiteToMarkdownSpider {
         // converted nor followed. Requests already queued when the cap hits
         // may still be fetched, matching upstream.
         if self.max_pages > 0 {
-            let reserved = self
-                .page_count
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |c| {
-                    (c < self.max_pages).then_some(c + 1)
-                });
-            if reserved.is_err() {
-                return (vec![], vec![]);
+            // Compare-exchange loop instead of `fetch_update`: the latter
+            // was deprecated (renamed) on newer toolchains while the new
+            // name is not available on the MSRV.
+            let mut count = self.page_count.load(Ordering::SeqCst);
+            loop {
+                if count >= self.max_pages {
+                    return (vec![], vec![]);
+                }
+                match self.page_count.compare_exchange(
+                    count,
+                    count + 1,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => count = actual,
+                }
             }
         } else {
             self.page_count.fetch_add(1, Ordering::SeqCst);
