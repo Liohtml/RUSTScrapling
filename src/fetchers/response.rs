@@ -127,9 +127,14 @@ impl Response {
         match css_selector {
             None => page.markdown().to_string(),
             Some(sel) => {
+                // Matches sitting inside hidden/noise ancestors are
+                // rejected: converting such a subtree from its own root
+                // would resurrect content the sanitizer guarantees to
+                // strip (upstream drops hidden subtrees before selecting).
                 let parts: Vec<String> = page
                     .css(sel)
                     .into_iter()
+                    .filter(|el| !crate::parser::markdown::in_hidden_context(el))
                     .map(|el| el.markdown().to_string())
                     .collect();
                 parts.join("\n")
