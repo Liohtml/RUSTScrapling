@@ -58,7 +58,7 @@ impl Selector {
     }
 
     /// Get a NodeRef for this selector's node.
-    fn node_ref(&self) -> ego_tree::NodeRef<'_, Node> {
+    pub(crate) fn node_ref(&self) -> ego_tree::NodeRef<'_, Node> {
         self.tree
             .tree
             .get(self.node_id)
