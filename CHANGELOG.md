@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-10-11
+
+Site-to-Markdown conversion for RAG/LLM ingestion pipelines, ported from
+upstream Scrapling v0.4.15.
+
+### Added
+
+- **`SiteToMarkdownSpider`**: crawl a website and convert every page to
+  clean, LLM-ready Markdown. Yields one item per page with `url`, `title`,
+  and `markdown` keys; optional `output_dir` also writes each page to a
+  `.md` file named after its URL (collisions get a hash suffix).
+  `allowed_domains` is required so the crawl stays bound to the target
+  site; `max_pages` caps conversion and link-following; custom `rules`
+  narrow the crawl.
+- **`Response::markdown(css_selector, main_content_only)`** on fetcher and
+  spider responses, and **`Selector::markdown()`**: dependency-free
+  HTML → Markdown conversion. Scripts, styles, and hidden /
+  prompt-injection content are always removed first: CSS-hidden elements,
+  `aria-hidden`/`hidden` attributes, `<template>` tags, comments,
+  zero-width and ASCII control characters — including `css_selector`
+  matches that sit inside hidden ancestors. Hardened against hostile
+  pages: a depth cap prevents stack exhaustion on absurdly nested HTML,
+  and syntax-breaking URL characters are percent-escaped.
+
+### Changed
+
+- Dependency refresh: `h2` 0.4.20, `rustls` 0.23.45 (both past RUSTSEC
+  advisories), `anyhow` 1.0.104, `async-trait` 0.1.92, `serde_json`
+  1.0.152, `thiserror` 2.0.21, `env_logger` 0.11.11; CI's
+  `taiki-e/install-action` pinned to v2.87.24.
+
+### Notes
+
+- The remaining upstream v0.4.15 changes were evaluated and do not apply
+  to this port (Python-/browser-engine-specific, or already safe here).
+
 ## [0.3.1] - 2026-08-17
 
 Feed spiders, ported from upstream Scrapling v0.4.13.
@@ -243,6 +279,7 @@ upstream Scrapling v0.4.8 through v0.4.11.
 - **CLI**: `fetch` and `extract` subcommands with CSS selector and format options
 - **175 tests** covering all modules
 
+[0.4.0]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.4.0
 [0.3.1]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.3.0
 [0.2.3]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.2.3
