@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.1] - 2026-10-14
 
-Metadata-only release: no code changes.
+Metadata and lockfile release: no code changes.
 
 ### Changed
 
@@ -15,6 +15,8 @@ Metadata-only release: no code changes.
   redundant `html-parser`/`css-selectors`), and the description mentions
   the Markdown extraction and politeness features — so the crate is
   findable in the searches it actually serves.
+- `quinn-proto` 0.11.19 in the lockfile, past the QUIC memory-exhaustion
+  advisories RUSTSEC-2026-0339/0341/0342.
 
 ## [0.4.0] - 2026-10-11
 
