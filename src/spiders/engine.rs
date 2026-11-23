@@ -348,9 +348,12 @@ impl<S: Spider> CrawlerEngine<S> {
                 0.0
             };
             let static_delay = delay > 0.0 && self.throttle.is_none();
-            if static_delay {
-                // Wait out the window BEFORE choosing the request, so the
-                // one that runs is the best one at dispatch time.
+            // Wait out the window BEFORE choosing the request, so the one
+            // that runs is the best one at dispatch time. With nothing
+            // queued there is nothing to space out: skip the wait, so a
+            // finished crawl ends at once instead of sitting out the last
+            // window.
+            if static_delay && !self.scheduler.lock().await.is_empty() {
                 tokio::time::sleep_until(next_dispatch_at).await;
                 if self.paused.load(Ordering::SeqCst) {
                     break;
@@ -604,8 +607,8 @@ impl<S: Spider> CrawlerEngine<S> {
         // Lazily fetch robots.txt for domains discovered mid-crawl (only
         // seed domains are pre-fetched), otherwise a follow link to a new
         // host would bypass the Robots Exclusion Protocol. Offsite requests
-        // were rejected above, so no robots.txt is fetched for a domain the
-        // crawl will never visit.
+        // were rejected above, so following a link never fetches robots.txt
+        // for a domain outside `allowed_domains`.
         let mut robots_crawl_delay: Option<f64> = None;
         if let Some(ref robots) = robots_manager {
             // Fetch robots.txt from the request's actual origin (scheme +

@@ -1444,3 +1444,31 @@ async fn blocked_retry_is_not_run_back_to_back_under_dfs() {
         "depth-first order, with the blocked /c retried last"
     );
 }
+
+#[tokio::test]
+async fn crawl_does_not_sit_out_the_last_delay_window() {
+    // After the final request there is nothing left to space out: the
+    // crawl must end right away, not wait a full download delay.
+    let (addr, _max, server) =
+        spawn_counting_server(vec![std::time::Duration::from_millis(0)]).await;
+    let engine = CrawlerEngine::new(
+        Arc::new(DelaySpider {
+            urls: vec![format!("http://{addr}/only")],
+            delay: 3.0,
+        }),
+        SessionManager::new(FetcherConfig::default()),
+        None,
+    )
+    .expect("engine builds");
+
+    let started = std::time::Instant::now();
+    let result = engine.crawl().await;
+    let elapsed = started.elapsed();
+    server.abort();
+
+    assert_eq!(result.items.len(), 1);
+    assert!(
+        elapsed < std::time::Duration::from_millis(2000),
+        "one request with a 3 s delay must not take 3 s, took {elapsed:?}"
+    );
+}
