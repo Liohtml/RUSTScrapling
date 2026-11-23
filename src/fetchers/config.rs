@@ -70,6 +70,19 @@ impl Default for FetcherConfig {
     }
 }
 
+/// Re-key a header map by lowercase name. Should one header appear under
+/// two spellings (`Accept` and `accept`), the spelling that sorts last wins
+/// — an arbitrary but fixed rule, so the result never depends on hash-map
+/// iteration order.
+pub(crate) fn lowercase_header_names(headers: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut names: Vec<&String> = headers.keys().collect();
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| (name.to_ascii_lowercase(), headers[name].clone()))
+        .collect()
+}
+
 impl FetcherConfig {
     /// Returns a builder initialised with default values.
     pub fn builder() -> FetcherConfigBuilder {
@@ -87,11 +100,7 @@ impl FetcherConfig {
     /// the `user_agent` option, else from a configured `User-Agent` header,
     /// else from the built-in rotation.
     pub fn build_headers(&self, url: &str, stealth: bool) -> HashMap<String, String> {
-        let mut headers: HashMap<String, String> = self
-            .headers
-            .iter()
-            .map(|(name, value)| (name.to_ascii_lowercase(), value.clone()))
-            .collect();
+        let mut headers = lowercase_header_names(&self.headers);
 
         // User-Agent is always set.
         let configured_ua = self

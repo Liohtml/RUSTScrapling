@@ -501,8 +501,8 @@ async fn main() {
 |--------|---------|-------------|
 | `concurrent_requests()` | `4` | Global concurrency limit |
 | `concurrent_requests_per_domain()` | `0` | Per-domain limit (0 = disabled) |
-| `download_delay()` | `0.0` | Seconds between requests |
-| `robots_txt_obey()` | `false` | Respect robots.txt (Allow/Disallow with wildcards, Crawl-delay). A site with no robots.txt (4xx) is fully allowed; one whose robots.txt is unreachable (5xx, network error) is fully disallowed, per RFC 9309 |
+| `download_delay()` | `0.0` | Minimum seconds between request dispatches (runs alongside in-flight requests) |
+| `robots_txt_obey()` | `false` | Respect robots.txt (Allow/Disallow with wildcards, Crawl-delay). A site with no robots.txt (4xx) is fully allowed; one whose robots.txt is unreachable (5xx, 429, network error) is fully disallowed for the rest of the crawl, per RFC 9309. Pages replayed from the dev cache are not subject to robots.txt |
 | `crawl_strategy()` | `Bfs` | Order of equal-priority requests: `CrawlStrategy::Bfs` crawls level by level from the start URLs, `CrawlStrategy::Dfs` follows the newest link first. Priority always wins |
 | `max_blocked_retries()` | `3` | Retry limit for blocked responses |
 | `allowed_domains()` | `{}` | Domain whitelist (empty = allow all) |

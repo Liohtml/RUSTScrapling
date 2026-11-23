@@ -1249,3 +1249,198 @@ async fn missing_robots_txt_allows_the_whole_site() {
     let served = paths.lock().unwrap().clone();
     assert!(served.contains(&"/a".to_string()) && served.contains(&"/b".to_string()));
 }
+
+// --- review regressions for the upstream v0.5 port ---
+
+/// Live spider with one request at a time and a static download delay.
+struct DelaySpider {
+    urls: Vec<String>,
+    delay: f64,
+}
+
+#[async_trait]
+impl Spider for DelaySpider {
+    fn name(&self) -> &str {
+        "delay-spider"
+    }
+    fn start_urls(&self) -> Vec<String> {
+        self.urls.clone()
+    }
+    fn concurrent_requests(&self) -> u32 {
+        1
+    }
+    fn download_delay(&self) -> f64 {
+        self.delay
+    }
+
+    async fn parse(
+        &self,
+        response: SpiderResponse,
+    ) -> (Vec<serde_json::Value>, Vec<SpiderRequest>) {
+        (vec![serde_json::json!({ "url": response.url() })], vec![])
+    }
+}
+
+#[tokio::test]
+async fn download_delay_runs_alongside_in_flight_requests() {
+    // The delay is measured between dispatches, so with one slot and a
+    // server as slow as the delay the cadence is max(delay, latency) — not
+    // their sum, which is what sleeping after the slot frees would give.
+    let step = std::time::Duration::from_millis(400);
+    let (addr, _max, server) = spawn_counting_server(vec![step; 4]).await;
+    let urls = (0..4).map(|i| format!("http://{addr}/p{i}")).collect();
+    let engine = CrawlerEngine::new(
+        Arc::new(DelaySpider {
+            urls,
+            delay: step.as_secs_f64(),
+        }),
+        SessionManager::new(FetcherConfig::default()),
+        None,
+    )
+    .expect("engine builds");
+
+    let started = std::time::Instant::now();
+    let result = engine.crawl().await;
+    let elapsed = started.elapsed();
+    server.abort();
+
+    assert_eq!(result.items.len(), 4);
+    // Three delay windows separate four dispatches.
+    assert!(
+        elapsed >= step * 3,
+        "delay must be honored, took {elapsed:?}"
+    );
+    // max(delay, latency) cadence: ~4 steps. The summed cadence would take
+    // ~7 steps (2.8 s).
+    assert!(
+        elapsed < step * 6,
+        "delay must overlap the in-flight request, took {elapsed:?}"
+    );
+}
+
+/// Dev-mode spider that also obeys robots.txt.
+struct OfflineReplaySpider {
+    urls: Vec<String>,
+}
+
+#[async_trait]
+impl Spider for OfflineReplaySpider {
+    fn name(&self) -> &str {
+        "offline-replay-spider"
+    }
+    fn start_urls(&self) -> Vec<String> {
+        self.urls.clone()
+    }
+    fn development_mode(&self) -> bool {
+        true
+    }
+    fn robots_txt_obey(&self) -> bool {
+        true
+    }
+
+    async fn parse(
+        &self,
+        response: SpiderResponse,
+    ) -> (Vec<serde_json::Value>, Vec<SpiderRequest>) {
+        (vec![serde_json::json!({ "url": response.url() })], vec![])
+    }
+}
+
+#[tokio::test]
+async fn offline_dev_cache_replay_works_with_robots_txt_obey() {
+    // With the site unreachable, robots.txt is unreachable too and means
+    // disallow-all — but pages replayed from the dev cache never contact
+    // the site, so they must still be served.
+    let closed = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap()
+    }; // listener dropped: the port now refuses connections
+
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().to_str().unwrap().to_string();
+    let cached: Vec<String> = (0..3).map(|i| format!("http://{closed}/p{i}")).collect();
+    seed_cache(&base, &cached).await;
+
+    let mut urls = cached.clone();
+    urls.push(format!("http://{closed}/not-cached"));
+    let engine = CrawlerEngine::new(
+        Arc::new(OfflineReplaySpider { urls }),
+        SessionManager::new(FetcherConfig::builder().retries(0).build()),
+        Some(&base),
+    )
+    .expect("engine builds");
+    let result = engine.crawl().await;
+
+    assert_eq!(result.items.len(), 3, "cached pages are replayed");
+    assert_eq!(result.stats.cache_hits, 3);
+    assert_eq!(
+        result.stats.robots_disallowed_count, 1,
+        "only the request that would go live is subject to robots.txt"
+    );
+}
+
+/// Depth-first live spider whose first response for `/c` counts as blocked.
+struct BlockedOnceSpider {
+    urls: Vec<String>,
+    blocked_once: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl Spider for BlockedOnceSpider {
+    fn name(&self) -> &str {
+        "blocked-once-spider"
+    }
+    fn start_urls(&self) -> Vec<String> {
+        self.urls.clone()
+    }
+    fn concurrent_requests(&self) -> u32 {
+        1
+    }
+    fn crawl_strategy(&self) -> rust_scrapling::CrawlStrategy {
+        rust_scrapling::CrawlStrategy::Dfs
+    }
+    async fn is_blocked(&self, response: &SpiderResponse) -> bool {
+        response.url().ends_with("/c")
+            && !self
+                .blocked_once
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    async fn parse(
+        &self,
+        response: SpiderResponse,
+    ) -> (Vec<serde_json::Value>, Vec<SpiderRequest>) {
+        (vec![serde_json::json!({ "url": response.url() })], vec![])
+    }
+}
+
+#[tokio::test]
+async fn blocked_retry_is_not_run_back_to_back_under_dfs() {
+    // Upstream parity: a blocked request is retried one priority step
+    // lower. Under depth-first the retry would otherwise be the newest
+    // request and hit the blocking site again immediately.
+    let (addr, paths, server) = spawn_robots_status_server(404).await;
+    let urls = ["a", "b", "c"]
+        .iter()
+        .map(|p| format!("http://{addr}/{p}"))
+        .collect();
+    let engine = CrawlerEngine::new(
+        Arc::new(BlockedOnceSpider {
+            urls,
+            blocked_once: std::sync::atomic::AtomicBool::new(false),
+        }),
+        SessionManager::new(FetcherConfig::default()),
+        None,
+    )
+    .expect("engine builds");
+
+    let result = engine.crawl().await;
+    server.abort();
+
+    assert_eq!(result.items.len(), 3);
+    assert_eq!(
+        paths.lock().unwrap().clone(),
+        vec!["/c", "/b", "/a", "/c"],
+        "depth-first order, with the blocked /c retried last"
+    );
+}

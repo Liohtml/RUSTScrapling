@@ -257,9 +257,7 @@ impl Fetcher {
             // `headers` is keyed by lowercase names; a per-request header
             // spelled differently must replace the configured one, not be
             // sent next to it.
-            for (k, v) in extra {
-                headers.insert(k.to_ascii_lowercase(), v.clone());
-            }
+            headers.extend(crate::fetchers::config::lowercase_header_names(extra));
         }
 
         let mut last_error: Option<reqwest::Error> = None;

@@ -207,6 +207,22 @@ fn configured_user_agent_header_is_not_overridden_by_the_rotation() {
     );
 }
 
+#[test]
+fn two_spellings_of_one_header_resolve_deterministically() {
+    // Reachable only by writing the public `headers` field directly (the
+    // builder lowercases names). The winner must not depend on hash-map
+    // iteration order: the spelling that sorts last wins.
+    for _ in 0..50 {
+        let mut cfg = FetcherConfig::default();
+        cfg.headers
+            .insert("Accept".to_string(), "upper".to_string());
+        cfg.headers
+            .insert("accept".to_string(), "lower".to_string());
+        let headers = cfg.build_headers("https://example.com", true);
+        assert_eq!(headers.get("accept").map(String::as_str), Some("lower"));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ProxyRotator
 // ---------------------------------------------------------------------------

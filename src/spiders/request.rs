@@ -164,6 +164,12 @@ impl SpiderRequest {
         self.retry_count += 1;
     }
 
+    /// Change the scheduling priority (higher values are dequeued first).
+    /// Takes effect when the request is next enqueued.
+    pub fn set_priority(&mut self, priority: i32) {
+        self.priority = priority;
+    }
+
     /// Recompute the dedup fingerprint with the given options:
     /// `include_kwargs` mixes in the metadata map, `include_headers` the
     /// headers (both key-sorted), and `keep_fragments` keeps the URL
@@ -251,8 +257,9 @@ impl PartialOrd for SpiderRequest {
 impl Ord for SpiderRequest {
     fn cmp(&self, other: &Self) -> Ordering {
         // Tie-break on fingerprint so `cmp` stays consistent with `PartialEq`
-        // (required by the `Ord` contract: a == b iff a.cmp(b) == Equal) and
-        // so same-priority requests get a deterministic, not arbitrary, order.
+        // (required by the `Ord` contract: a == b iff a.cmp(b) == Equal).
+        // The scheduler does not use this ordering: it serves equal
+        // priorities by arrival, per its `CrawlStrategy`.
         self.priority
             .cmp(&other.priority)
             .then_with(|| self.fingerprint.cmp(&other.fingerprint))
