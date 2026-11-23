@@ -107,6 +107,13 @@ pub trait Spider: Send + Sync + 'static {
         false
     }
 
+    /// Order in which requests of equal priority are crawled:
+    /// breadth-first (the default) or depth-first. Priority always wins
+    /// first. See [`CrawlStrategy`](crate::spiders::scheduler::CrawlStrategy).
+    fn crawl_strategy(&self) -> crate::spiders::scheduler::CrawlStrategy {
+        crate::spiders::scheduler::CrawlStrategy::Bfs
+    }
+
     /// The initial requests of the crawl. Defaults to a plain GET per
     /// [`Spider::start_urls`] entry; override to customize method, headers,
     /// priority, etc.

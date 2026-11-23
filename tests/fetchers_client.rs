@@ -200,6 +200,64 @@ async fn session_manager_forwards_request_level_headers() {
     );
 }
 
+#[tokio::test]
+async fn per_request_header_replaces_the_configured_one_regardless_of_case() {
+    // Upstream v0.5 parity: a per-request `User-Agent` used to be sent next
+    // to the configured `user-agent`, so the server saw two of them.
+    use rust_scrapling::spiders::request::SpiderRequest;
+    use rust_scrapling::spiders::session::SessionManager;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut received = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = socket.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            received.extend_from_slice(&buf[..n]);
+            if received.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .await
+            .unwrap();
+        socket.shutdown().await.unwrap();
+        String::from_utf8_lossy(&received).to_string()
+    });
+
+    let config = FetcherConfig::builder()
+        .user_agent("ConfiguredBot/1.0")
+        .build();
+    let mut manager = SessionManager::new(config);
+    manager.ensure_default().unwrap();
+
+    let request = SpiderRequest::builder(&format!("http://{}/", addr))
+        .header("User-Agent", "PerRequestBot/2.0")
+        .build();
+    let response = manager.fetch(&request).await.expect("request succeeds");
+    assert_eq!(response.status(), 200);
+
+    let request_text = server.await.unwrap().to_lowercase();
+    let ua_lines: Vec<&str> = request_text
+        .lines()
+        .filter(|l| l.starts_with("user-agent:"))
+        .collect();
+    assert_eq!(
+        ua_lines,
+        vec!["user-agent: perrequestbot/2.0"],
+        "exactly one User-Agent, the per-request one; got request:\n{request_text}"
+    );
+}
+
 // Network tests (these hit httpbin.org - marked with #[ignore] so they don't run by default)
 #[tokio::test]
 #[ignore]

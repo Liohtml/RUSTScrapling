@@ -604,3 +604,103 @@ async fn site_to_markdown_spider_max_pages_caps_conversion_and_following() {
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["url"], "https://example.com/");
 }
+
+// --- upstream v0.5 parity ---
+
+/// Crawl a small seeded site with one request at a time and return the
+/// pages in the order they were parsed.
+async fn crawl_order(strategy: rust_scrapling::CrawlStrategy) -> Vec<String> {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().to_str().unwrap().to_string();
+    // root -> a, b ; a -> a1 ; b -> b1
+    seed(
+        &base,
+        &[
+            (
+                "https://example.com/",
+                "text/html",
+                r#"<a href="/a">a</a><a href="/b">b</a>"#,
+            ),
+            (
+                "https://example.com/a",
+                "text/html",
+                r#"<a href="/a1">a1</a>"#,
+            ),
+            (
+                "https://example.com/b",
+                "text/html",
+                r#"<a href="/b1">b1</a>"#,
+            ),
+            ("https://example.com/a1", "text/html", "<p>leaf</p>"),
+            ("https://example.com/b1", "text/html", "<p>leaf</p>"),
+        ],
+    )
+    .await;
+
+    let spider = CrawlSpider::builder("order")
+        .start_urls(["https://example.com/"])
+        .rule(CrawlRule::new(LinkExtractor::new()))
+        .parse_item(Arc::new(|resp: &SpiderResponse| {
+            vec![serde_json::json!({ "url": resp.url() })]
+        }))
+        .concurrent_requests(1)
+        .crawl_strategy(strategy)
+        .development_mode(true)
+        .build();
+    let engine = CrawlerEngine::new(
+        Arc::new(spider),
+        SessionManager::new(FetcherConfig::default()),
+        Some(&base),
+    )
+    .expect("engine builds");
+    engine
+        .crawl()
+        .await
+        .items
+        .into_iter()
+        .map(|i| {
+            i["url"]
+                .as_str()
+                .unwrap()
+                .trim_start_matches("https://example.com")
+                .to_string()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn crawl_strategy_bfs_visits_level_by_level() {
+    assert_eq!(
+        crawl_order(rust_scrapling::CrawlStrategy::Bfs).await,
+        vec!["/", "/a", "/b", "/a1", "/b1"]
+    );
+}
+
+#[tokio::test]
+async fn crawl_strategy_dfs_follows_the_newest_link_first() {
+    assert_eq!(
+        crawl_order(rust_scrapling::CrawlStrategy::Dfs).await,
+        vec!["/", "/b", "/b1", "/a", "/a1"]
+    );
+}
+
+#[tokio::test]
+async fn csv_feed_strips_a_leading_bom_from_the_first_column_name() {
+    use rust_scrapling::spiders::spider::Spider;
+    let spider = rust_scrapling::CsvFeedSpider::builder("bom")
+        .feed_url("https://example.com/feed.csv")
+        .build();
+    let (items, _) = spider
+        .parse(feed_response("text/csv", "\u{feff}id,name\n1,a\n"))
+        .await;
+    assert_eq!(items, vec![serde_json::json!({ "id": "1", "name": "a" })]);
+}
+
+#[test]
+fn content_spider_is_an_alias_of_site_to_markdown_spider() {
+    let spider: rust_scrapling::ContentSpider = rust_scrapling::SiteToMarkdownSpider::builder("c")
+        .start_url("https://example.com/")
+        .allowed_domains(["example.com".to_string()])
+        .build();
+    let _: rust_scrapling::SiteToMarkdownSpider = spider;
+}

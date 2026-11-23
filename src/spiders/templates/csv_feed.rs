@@ -141,7 +141,14 @@ impl Spider for CsvFeedSpider {
         &self,
         response: SpiderResponse,
     ) -> (Vec<serde_json::Value>, Vec<SpiderRequest>) {
-        let rows = parse_csv(response.text(), self.delimiter);
+        // Spreadsheet exports often start with a BOM, which would otherwise
+        // end up in the first column name. The fetcher's decoder already
+        // drops it; this covers bodies that arrive pre-decoded.
+        let text = response.text();
+        let rows = parse_csv(
+            text.strip_prefix('\u{feff}').unwrap_or(text),
+            self.delimiter,
+        );
         let mut rows_iter = rows.into_iter();
 
         let headers: Vec<String> = match &self.headers {

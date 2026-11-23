@@ -134,3 +134,82 @@ fn test_restored_pending_reenqueues_with_dont_filter() {
     }
     assert_eq!(resumed.len(), 1);
 }
+
+// --- crawl strategy (upstream v0.5) ---
+
+use rust_scrapling::spiders::scheduler::CrawlStrategy;
+
+fn drain(sched: &mut Scheduler) -> Vec<String> {
+    std::iter::from_fn(|| sched.dequeue())
+        .map(|r| r.url().to_string())
+        .collect()
+}
+
+fn urls(names: &[&str]) -> Vec<String> {
+    names
+        .iter()
+        .map(|n| format!("https://example.com/{n}"))
+        .collect()
+}
+
+#[test]
+fn bfs_serves_equal_priority_requests_oldest_first() {
+    // The default. Before v0.5 parity, ties were broken by fingerprint
+    // hash, i.e. an arbitrary order unrelated to discovery order.
+    let mut sched = Scheduler::new(false, false, false);
+    for url in urls(&["c", "a", "d", "b"]) {
+        sched.enqueue(SpiderRequest::new(&url));
+    }
+    assert_eq!(drain(&mut sched), urls(&["c", "a", "d", "b"]));
+}
+
+#[test]
+fn dfs_serves_equal_priority_requests_newest_first() {
+    let mut sched = Scheduler::new(false, false, false).crawl_strategy(CrawlStrategy::Dfs);
+    for url in urls(&["c", "a", "d", "b"]) {
+        sched.enqueue(SpiderRequest::new(&url));
+    }
+    assert_eq!(drain(&mut sched), urls(&["b", "d", "a", "c"]));
+}
+
+#[test]
+fn priority_beats_the_crawl_strategy() {
+    for strategy in [CrawlStrategy::Bfs, CrawlStrategy::Dfs] {
+        let mut sched = Scheduler::new(false, false, false).crawl_strategy(strategy);
+        sched.enqueue(SpiderRequest::new("https://example.com/low-1"));
+        sched.enqueue(
+            SpiderRequest::builder("https://example.com/high")
+                .priority(10)
+                .build(),
+        );
+        sched.enqueue(SpiderRequest::new("https://example.com/low-2"));
+        let order = drain(&mut sched);
+        assert_eq!(order[0], "https://example.com/high", "{strategy:?}");
+    }
+}
+
+#[test]
+fn snapshot_and_restore_keep_the_dequeue_order_under_both_strategies() {
+    for strategy in [CrawlStrategy::Bfs, CrawlStrategy::Dfs] {
+        let mut original = Scheduler::new(false, false, false).crawl_strategy(strategy);
+        for url in urls(&["c", "a", "d", "b"]) {
+            original.enqueue(SpiderRequest::new(&url));
+        }
+        original.enqueue(
+            SpiderRequest::builder("https://example.com/high")
+                .priority(5)
+                .build(),
+        );
+
+        let (pending, seen) = original.snapshot();
+        let expected = drain(&mut original);
+        // The snapshot itself is already in dequeue order.
+        let snapshot_order: Vec<String> = pending.iter().map(|r| r.url().to_string()).collect();
+        assert_eq!(snapshot_order, expected, "{strategy:?}");
+
+        let mut resumed = Scheduler::new(false, false, false).crawl_strategy(strategy);
+        resumed.restore_seen(seen);
+        resumed.restore_pending(pending);
+        assert_eq!(drain(&mut resumed), expected, "{strategy:?}");
+    }
+}

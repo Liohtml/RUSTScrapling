@@ -82,13 +82,51 @@ impl RobotsTxtManager {
     /// network I/O — the caller fetches through whatever client it wants
     /// (the engine uses the spider's configured session, so robots.txt
     /// requests honor the same proxy, TLS, and header settings as every
-    /// other request). Pass `None` when the fetch failed or returned a
-    /// non-2xx status: that yields allow-all rules, per convention.
+    /// other request). Pass `None` when robots.txt is *unavailable* (a 4xx
+    /// status, i.e. the site has none): that yields allow-all rules. When
+    /// it is *unreachable* instead (5xx or a network failure), use
+    /// [`Self::unreachable`] — see [`Self::from_status`] for the mapping.
     pub fn parse_fetched(user_agent: &str, body: Option<&str>) -> FetchedRobots {
         match body {
             Some(text) => FetchedRobots(Self::parse_robots(text, user_agent)),
             None => FetchedRobots(RobotsRules::allow_all()),
         }
+    }
+
+    /// Rules for an origin whose robots.txt could not be reached (server
+    /// error or network failure): everything is disallowed. RFC 9309
+    /// §2.3.1.4 requires assuming complete disallow in that case — a site
+    /// that is failing must not be crawled as if it had no rules.
+    pub fn unreachable() -> FetchedRobots {
+        FetchedRobots(RobotsRules::disallow_all())
+    }
+
+    /// Map a robots.txt fetch outcome to rules, per RFC 9309 §2.3.1:
+    /// a 2xx `status` parses `body`; a 4xx means the file is unavailable
+    /// and everything is allowed; anything else (5xx, an unfollowed
+    /// redirect, and 429) and a failed fetch (`None`) mean it is
+    /// unreachable and everything is disallowed. The outcome is cached for
+    /// the rest of the crawl like any other robots.txt result.
+    pub fn from_status(user_agent: &str, outcome: Option<(u16, &str)>) -> FetchedRobots {
+        match outcome {
+            Some((status, body)) if (200..300).contains(&status) => {
+                Self::parse_fetched(user_agent, Some(body))
+            }
+            Some((status, _)) if Self::status_is_reachable(status) => {
+                Self::parse_fetched(user_agent, None)
+            }
+            _ => Self::unreachable(),
+        }
+    }
+
+    /// Whether a robots.txt response `status` means the file was reached
+    /// (2xx) or definitively does not exist (4xx). Everything else is
+    /// *unreachable* and maps to full disallow in [`Self::from_status`]:
+    /// 5xx, an unfollowed redirect, and also `429 Too Many Requests` — a
+    /// server asking for fewer requests must not be read as "no rules".
+    #[must_use]
+    pub fn status_is_reachable(status: u16) -> bool {
+        (200..300).contains(&status) || ((400..500).contains(&status) && status != 429)
     }
 
     /// Fetch and parse robots.txt for an origin without borrowing a manager.
@@ -98,8 +136,9 @@ impl RobotsTxtManager {
     /// any [`FetcherConfig`](crate::fetchers::config::FetcherConfig)
     /// settings (proxy, TLS, headers); the engine instead fetches
     /// robots.txt through the spider's session and uses
-    /// [`Self::parse_fetched`]. Unreachable or non-2xx robots.txt endpoints
-    /// yield allow-all rules.
+    /// [`Self::from_status`]. Outcomes are mapped as in
+    /// [`Self::from_status`]: 4xx allows everything, 5xx and network
+    /// failures disallow everything.
     pub async fn fetch_rules(user_agent: &str, origin: &str) -> FetchedRobots {
         let url = if origin.contains("://") {
             format!("{}/robots.txt", origin)
@@ -111,14 +150,26 @@ impl RobotsTxtManager {
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
-        let rules = match client.get(&url).send().await {
-            Ok(resp) if resp.status().is_success() => match resp.text().await {
-                Ok(text) => Self::parse_robots(&text, user_agent),
-                Err(_) => RobotsRules::allow_all(),
-            },
-            _ => RobotsRules::allow_all(),
+        let outcome = match client.get(&url).send().await {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                resp.text().await.ok().map(|text| (status, text))
+            }
+            Err(_) => None,
         };
-        FetchedRobots(rules)
+        match &outcome {
+            Some((status, _)) if Self::status_is_reachable(*status) => {}
+            Some((status, _)) => {
+                log::warn!("robots.txt at {url} returned status {status}; assuming full disallow");
+            }
+            None => log::warn!("robots.txt at {url} is unreachable; assuming full disallow"),
+        }
+        Self::from_status(
+            user_agent,
+            outcome
+                .as_ref()
+                .map(|(status, text)| (*status, text.as_str())),
+        )
     }
 
     /// Store previously fetched rules under a cache key (see
@@ -180,6 +231,9 @@ impl RobotsTxtManager {
     }
 
     fn parse_robots(text: &str, user_agent: &str) -> RobotsRules {
+        // Left in place, a BOM hides the first line (usually
+        // `User-agent: *`) and with it the whole first group.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let ua_lower = user_agent.to_lowercase();
         // RFC 9309 matches groups against the crawler's product token, so
         // "User-agent: MyBot" applies to a crawler identifying as
@@ -220,6 +274,13 @@ impl RobotsRules {
     fn allow_all() -> Self {
         Self {
             rules: Vec::new(),
+            crawl_delay: None,
+        }
+    }
+
+    fn disallow_all() -> Self {
+        Self {
+            rules: vec![(false, "/".to_string())],
             crawl_delay: None,
         }
     }
@@ -630,13 +691,73 @@ mod tests {
     #[tokio::test]
     async fn fetch_robots_normalizes_bare_domain_to_https_key() {
         // The .invalid TLD (RFC 2606) can never resolve: the fetch must
-        // fall back to allow-all rather than erroring or hanging. The bare
-        // domain is stored under its https origin so https-URL lookups hit
-        // the entry.
+        // not error or hang, and an unreachable robots.txt means full
+        // disallow (RFC 9309 §2.3.1.4). The bare domain is stored under its
+        // https origin so https-URL lookups hit the entry.
         let mut mgr = RobotsTxtManager::new("MyBot");
         mgr.fetch_robots("unreachable.invalid").await;
         assert!(mgr.has_domain("https://unreachable.invalid"));
-        assert!(mgr.is_allowed("https://unreachable.invalid/anything"));
+        assert!(!mgr.is_allowed("https://unreachable.invalid/anything"));
+    }
+
+    #[test]
+    fn leading_bom_does_not_hide_the_first_group() {
+        // Upstream v0.5.1 parity: with the BOM left in place the first
+        // line is not recognised as `User-agent:` and its rules are lost.
+        let mut mgr = RobotsTxtManager::new("MyBot");
+        mgr.insert_rules(
+            "https://example.com",
+            RobotsTxtManager::parse_fetched(
+                "MyBot",
+                Some("\u{feff}User-agent: *\nDisallow: /private\n"),
+            ),
+        );
+        assert!(!mgr.is_allowed("https://example.com/private/x"));
+        assert!(mgr.is_allowed("https://example.com/public"));
+    }
+
+    #[test]
+    fn fetch_outcomes_map_per_rfc_9309() {
+        let allowed = |fetched: FetchedRobots| {
+            let mut mgr = RobotsTxtManager::new("MyBot");
+            mgr.insert_rules("https://example.com", fetched);
+            (
+                mgr.is_allowed("https://example.com/private/x"),
+                mgr.is_allowed("https://example.com/public"),
+            )
+        };
+        let body = "User-agent: *\nDisallow: /private\n";
+        // 2xx: the body's rules apply.
+        assert_eq!(
+            allowed(RobotsTxtManager::from_status("MyBot", Some((200, body)))),
+            (false, true)
+        );
+        // 4xx: no robots.txt exists — everything is allowed, and an error
+        // page's body is never parsed as rules.
+        for status in [401, 403, 404, 410, 451] {
+            assert_eq!(
+                allowed(RobotsTxtManager::from_status("MyBot", Some((status, body)))),
+                (true, true),
+                "status {status}"
+            );
+        }
+        // 5xx, unfollowed redirects, and failed fetches: unreachable —
+        // everything is disallowed.
+        // 429 is a server asking for fewer requests, not "no rules".
+        for outcome in [
+            Some((500, body)),
+            Some((503, "")),
+            Some((301, "")),
+            Some((429, body)),
+            None,
+        ] {
+            assert_eq!(
+                allowed(RobotsTxtManager::from_status("MyBot", outcome)),
+                (false, false),
+                "outcome {outcome:?}"
+            );
+        }
+        assert_eq!(allowed(RobotsTxtManager::unreachable()), (false, false));
     }
 }
 

@@ -1144,3 +1144,331 @@ async fn robots_txt_is_fetched_through_the_configured_session() {
         "robots.txt must be fetched through the configured session; got:\n{robots_head}"
     );
 }
+
+/// Serve pages with 200 and `/robots.txt` with `robots_status` until
+/// aborted, recording every requested path.
+async fn spawn_robots_status_server(
+    robots_status: u16,
+) -> (
+    std::net::SocketAddr,
+    Arc<std::sync::Mutex<Vec<String>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let paths = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&paths);
+
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let mut buf = [0u8; 4096];
+            let mut head = Vec::new();
+            loop {
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buf[..n]);
+                if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head_text = String::from_utf8_lossy(&head);
+            let path = head_text
+                .lines()
+                .next()
+                .and_then(|l| l.split_whitespace().nth(1))
+                .unwrap_or("/")
+                .to_string();
+            let (status, body) = if path == "/robots.txt" {
+                // An error page whose body LOOKS like permissive rules: it
+                // must never be parsed as robots.txt.
+                (robots_status, "User-agent: *\nAllow: /\n".to_string())
+            } else {
+                (200, format!("<html><body>{path}</body></html>"))
+            };
+            let response = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+            recorded.lock().unwrap().push(path);
+        }
+    });
+
+    (addr, paths, handle)
+}
+
+#[tokio::test]
+async fn unreachable_robots_txt_disallows_the_whole_site() {
+    // Upstream v0.5 parity / RFC 9309 §2.3.1.4: a robots.txt that answers
+    // 5xx is "unreachable" and the site must be treated as fully
+    // disallowed — it used to be crawled as if it had no rules.
+    let (addr, paths, server) = spawn_robots_status_server(503).await;
+    let urls = vec![format!("http://{addr}/a"), format!("http://{addr}/b")];
+    let engine = CrawlerEngine::new(
+        Arc::new(RobotsSpider { urls }),
+        SessionManager::new(FetcherConfig::builder().retries(0).build()),
+        None,
+    )
+    .expect("engine builds");
+
+    let result = engine.crawl().await;
+    server.abort();
+
+    assert_eq!(result.items.len(), 0, "no page may be crawled");
+    assert_eq!(result.stats.robots_disallowed_count, 2);
+    let served = paths.lock().unwrap().clone();
+    assert!(served.iter().all(|p| p == "/robots.txt"), "{served:?}");
+}
+
+#[tokio::test]
+async fn missing_robots_txt_allows_the_whole_site() {
+    // A 4xx means the site has no robots.txt: everything is allowed.
+    let (addr, paths, server) = spawn_robots_status_server(404).await;
+    let urls = vec![format!("http://{addr}/a"), format!("http://{addr}/b")];
+    let engine = CrawlerEngine::new(
+        Arc::new(RobotsSpider { urls }),
+        SessionManager::new(FetcherConfig::builder().retries(0).build()),
+        None,
+    )
+    .expect("engine builds");
+
+    let result = engine.crawl().await;
+    server.abort();
+
+    assert_eq!(result.items.len(), 2);
+    assert_eq!(result.stats.robots_disallowed_count, 0);
+    let served = paths.lock().unwrap().clone();
+    assert!(served.contains(&"/a".to_string()) && served.contains(&"/b".to_string()));
+}
+
+// --- review regressions for the upstream v0.5 port ---
+
+/// Live spider with one request at a time and a static download delay.
+struct DelaySpider {
+    urls: Vec<String>,
+    delay: f64,
+}
+
+#[async_trait]
+impl Spider for DelaySpider {
+    fn name(&self) -> &str {
+        "delay-spider"
+    }
+    fn start_urls(&self) -> Vec<String> {
+        self.urls.clone()
+    }
+    fn concurrent_requests(&self) -> u32 {
+        1
+    }
+    fn download_delay(&self) -> f64 {
+        self.delay
+    }
+
+    async fn parse(
+        &self,
+        response: SpiderResponse,
+    ) -> (Vec<serde_json::Value>, Vec<SpiderRequest>) {
+        (vec![serde_json::json!({ "url": response.url() })], vec![])
+    }
+}
+
+#[tokio::test]
+async fn download_delay_runs_alongside_in_flight_requests() {
+    // The delay is measured between dispatches, so with one slot and a
+    // server as slow as the delay the cadence is max(delay, latency) — not
+    // their sum, which is what sleeping after the slot frees would give.
+    let step = std::time::Duration::from_millis(400);
+    let (addr, _max, server) = spawn_counting_server(vec![step; 4]).await;
+    let urls = (0..4).map(|i| format!("http://{addr}/p{i}")).collect();
+    let engine = CrawlerEngine::new(
+        Arc::new(DelaySpider {
+            urls,
+            delay: step.as_secs_f64(),
+        }),
+        SessionManager::new(FetcherConfig::default()),
+        None,
+    )
+    .expect("engine builds");
+
+    let started = std::time::Instant::now();
+    let result = engine.crawl().await;
+    let elapsed = started.elapsed();
+    server.abort();
+
+    assert_eq!(result.items.len(), 4);
+    // Three delay windows separate four dispatches.
+    assert!(
+        elapsed >= step * 3,
+        "delay must be honored, took {elapsed:?}"
+    );
+    // max(delay, latency) cadence: ~4 steps. The summed cadence would take
+    // ~7 steps (2.8 s).
+    assert!(
+        elapsed < step * 6,
+        "delay must overlap the in-flight request, took {elapsed:?}"
+    );
+}
+
+/// Dev-mode spider that also obeys robots.txt.
+struct OfflineReplaySpider {
+    urls: Vec<String>,
+}
+
+#[async_trait]
+impl Spider for OfflineReplaySpider {
+    fn name(&self) -> &str {
+        "offline-replay-spider"
+    }
+    fn start_urls(&self) -> Vec<String> {
+        self.urls.clone()
+    }
+    fn development_mode(&self) -> bool {
+        true
+    }
+    fn robots_txt_obey(&self) -> bool {
+        true
+    }
+
+    async fn parse(
+        &self,
+        response: SpiderResponse,
+    ) -> (Vec<serde_json::Value>, Vec<SpiderRequest>) {
+        (vec![serde_json::json!({ "url": response.url() })], vec![])
+    }
+}
+
+#[tokio::test]
+async fn offline_dev_cache_replay_works_with_robots_txt_obey() {
+    // With the site unreachable, robots.txt is unreachable too and means
+    // disallow-all — but pages replayed from the dev cache never contact
+    // the site, so they must still be served.
+    let closed = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap()
+    }; // listener dropped: the port now refuses connections
+
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().to_str().unwrap().to_string();
+    let cached: Vec<String> = (0..3).map(|i| format!("http://{closed}/p{i}")).collect();
+    seed_cache(&base, &cached).await;
+
+    let mut urls = cached.clone();
+    urls.push(format!("http://{closed}/not-cached"));
+    let engine = CrawlerEngine::new(
+        Arc::new(OfflineReplaySpider { urls }),
+        SessionManager::new(FetcherConfig::builder().retries(0).build()),
+        Some(&base),
+    )
+    .expect("engine builds");
+    let result = engine.crawl().await;
+
+    assert_eq!(result.items.len(), 3, "cached pages are replayed");
+    assert_eq!(result.stats.cache_hits, 3);
+    assert_eq!(
+        result.stats.robots_disallowed_count, 1,
+        "only the request that would go live is subject to robots.txt"
+    );
+}
+
+/// Depth-first live spider whose first response for `/c` counts as blocked.
+struct BlockedOnceSpider {
+    urls: Vec<String>,
+    blocked_once: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl Spider for BlockedOnceSpider {
+    fn name(&self) -> &str {
+        "blocked-once-spider"
+    }
+    fn start_urls(&self) -> Vec<String> {
+        self.urls.clone()
+    }
+    fn concurrent_requests(&self) -> u32 {
+        1
+    }
+    fn crawl_strategy(&self) -> rust_scrapling::CrawlStrategy {
+        rust_scrapling::CrawlStrategy::Dfs
+    }
+    async fn is_blocked(&self, response: &SpiderResponse) -> bool {
+        response.url().ends_with("/c")
+            && !self
+                .blocked_once
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    async fn parse(
+        &self,
+        response: SpiderResponse,
+    ) -> (Vec<serde_json::Value>, Vec<SpiderRequest>) {
+        (vec![serde_json::json!({ "url": response.url() })], vec![])
+    }
+}
+
+#[tokio::test]
+async fn blocked_retry_is_not_run_back_to_back_under_dfs() {
+    // Upstream parity: a blocked request is retried one priority step
+    // lower. Under depth-first the retry would otherwise be the newest
+    // request and hit the blocking site again immediately.
+    let (addr, paths, server) = spawn_robots_status_server(404).await;
+    let urls = ["a", "b", "c"]
+        .iter()
+        .map(|p| format!("http://{addr}/{p}"))
+        .collect();
+    let engine = CrawlerEngine::new(
+        Arc::new(BlockedOnceSpider {
+            urls,
+            blocked_once: std::sync::atomic::AtomicBool::new(false),
+        }),
+        SessionManager::new(FetcherConfig::default()),
+        None,
+    )
+    .expect("engine builds");
+
+    let result = engine.crawl().await;
+    server.abort();
+
+    assert_eq!(result.items.len(), 3);
+    assert_eq!(
+        paths.lock().unwrap().clone(),
+        vec!["/c", "/b", "/a", "/c"],
+        "depth-first order, with the blocked /c retried last"
+    );
+}
+
+#[tokio::test]
+async fn crawl_does_not_sit_out_the_last_delay_window() {
+    // After the final request there is nothing left to space out: the
+    // crawl must end right away, not wait a full download delay.
+    let (addr, _max, server) =
+        spawn_counting_server(vec![std::time::Duration::from_millis(0)]).await;
+    let engine = CrawlerEngine::new(
+        Arc::new(DelaySpider {
+            urls: vec![format!("http://{addr}/only")],
+            delay: 3.0,
+        }),
+        SessionManager::new(FetcherConfig::default()),
+        None,
+    )
+    .expect("engine builds");
+
+    let started = std::time::Instant::now();
+    let result = engine.crawl().await;
+    let elapsed = started.elapsed();
+    server.abort();
+
+    assert_eq!(result.items.len(), 1);
+    assert!(
+        elapsed < std::time::Duration::from_millis(2000),
+        "one request with a 3 s delay must not take 3 s, took {elapsed:?}"
+    );
+}

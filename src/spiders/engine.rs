@@ -156,7 +156,8 @@ impl<S: Spider> CrawlerEngine<S> {
             spider.fp_include_kwargs(),
             spider.fp_include_headers(),
             spider.fp_keep_fragments(),
-        );
+        )
+        .crawl_strategy(spider.crawl_strategy());
 
         let throttle = if spider.autothrottle_enabled() {
             Some(Arc::new(std::sync::Mutex::new(AutoThrottle::new(
@@ -230,18 +231,16 @@ impl<S: Spider> CrawlerEngine<S> {
                         // Full requests (method, headers, body, meta,
                         // priority) survived the checkpoint — restore them
                         // as-is rather than degrading to bare GETs.
-                        for mut req in data.pending_requests {
-                            req.set_dont_filter(true);
-                            sched.enqueue(req);
-                        }
+                        sched.restore_pending(data.pending_requests);
                     } else {
                         // Checkpoint written before `pending_requests`
                         // existed: only bare URLs are available.
-                        for url in &data.pending_urls {
-                            let mut req = SpiderRequest::new(url);
-                            req.set_dont_filter(true);
-                            sched.enqueue(req);
-                        }
+                        sched.restore_pending(
+                            data.pending_urls
+                                .iter()
+                                .map(|url| SpiderRequest::new(url))
+                                .collect(),
+                        );
                     }
                     true
                 } else {
@@ -302,11 +301,70 @@ impl<S: Spider> CrawlerEngine<S> {
             throttle: self.throttle.clone(),
         });
 
+        // Earliest instant the next live request may be dispatched: the
+        // spider's download delay, measured between dispatches. It runs
+        // concurrently with the in-flight requests instead of after a slot
+        // frees up, so the cadence is max(delay, time to get a slot), not
+        // their sum.
+        let mut next_dispatch_at = tokio::time::Instant::now();
+
         // Main crawl loop
         loop {
             if self.paused.load(Ordering::SeqCst) {
                 break;
             }
+
+            // Take a concurrency slot BEFORE taking a request. Dequeuing
+            // first would pull one request out ahead of capacity and hold
+            // it while every slot is busy: the pages being crawled could
+            // then no longer influence what runs next, which breaks
+            // depth-first order and lets an already-held request run ahead
+            // of a higher-priority one enqueued meanwhile.
+            let Ok(permit) = self.global_limiter.clone().acquire_owned().await else {
+                break;
+            };
+            // A pause requested while waiting for the slot must leave the
+            // next request in the queue for the checkpoint.
+            if self.paused.load(Ordering::SeqCst) {
+                break;
+            }
+
+            // Apply the spider's download delay here, in the single
+            // dispatch loop, so it actually throttles request *rate*.
+            // (Applying it inside each spawned task only added latency: N
+            // concurrent tasks slept in parallel and then all fired at
+            // once.) With AutoThrottle enabled the static delay is replaced
+            // by the adaptive per-domain schedule inside the task
+            // (download_delay still acts as its floor), so the dispatch
+            // loop never sleeps for one domain while others could be
+            // dispatched.
+            // Sanitized like delay_floor in process_request:
+            // Duration::from_secs_f64 panics on non-finite or oversized
+            // input, and a Spider impl could return either.
+            let delay = self.spider.download_delay();
+            let delay = if delay.is_finite() {
+                delay.clamp(0.0, 86_400.0)
+            } else {
+                0.0
+            };
+            let static_delay = delay > 0.0 && self.throttle.is_none();
+            // Wait out the window BEFORE choosing the request, so the one
+            // that runs is the best one at dispatch time. With nothing
+            // queued there is nothing to space out: skip the wait, so a
+            // finished crawl ends at once instead of sitting out the last
+            // window.
+            if static_delay && !self.scheduler.lock().await.is_empty() {
+                tokio::time::sleep_until(next_dispatch_at).await;
+                if self.paused.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+
+            // Read before dequeuing: if no task was running and the queue
+            // is empty, nothing can enqueue any more and the crawl is done.
+            // Reading it after an empty dequeue would race with a task that
+            // enqueued its follow-ups and finished in between.
+            let tasks_before_dequeue = self.active_tasks.load(Ordering::SeqCst);
 
             let request = {
                 let mut sched = self.scheduler.lock().await;
@@ -315,29 +373,11 @@ impl<S: Spider> CrawlerEngine<S> {
 
             match request {
                 Some(req) => {
-                    // Apply the spider's download delay here, in the single
-                    // dispatch loop, so it actually throttles request *rate*.
-                    // (Applying it inside each spawned task only added latency:
-                    // N concurrent tasks slept in parallel and then all fired
-                    // at once.) Requests that will be served from the dev
-                    // cache skip the delay — replays hit disk, not the site,
-                    // so there is nothing to be polite to.
-                    // With AutoThrottle enabled the static delay is replaced
-                    // by the adaptive per-domain schedule inside the task
-                    // (download_delay still acts as its floor), so the
-                    // dispatch loop never sleeps for one domain while others
-                    // could be dispatched.
-                    // Sanitized like delay_floor in process_request:
-                    // Duration::from_secs_f64 panics on non-finite or
-                    // oversized input, and a Spider impl could return either.
-                    let delay = self.spider.download_delay();
-                    let delay = if delay.is_finite() {
-                        delay.clamp(0.0, 86_400.0)
-                    } else {
-                        0.0
-                    };
+                    // Requests that will be served from the dev cache do
+                    // not open a delay window — replays hit disk, not the
+                    // site, so there is nothing to be polite to.
                     let mut delay_was_skipped = false;
-                    if delay > 0.0 && self.throttle.is_none() {
+                    if static_delay {
                         let served_from_cache = match &self.cache {
                             Some(c) => c.contains(req.url()).await,
                             None => false,
@@ -348,15 +388,10 @@ impl<S: Spider> CrawlerEngine<S> {
                             // goes to the live site after all.
                             delay_was_skipped = true;
                         } else {
-                            tokio::time::sleep(Duration::from_secs_f64(delay)).await;
+                            next_dispatch_at =
+                                tokio::time::Instant::now() + Duration::from_secs_f64(delay);
                         }
                     }
-
-                    let permit = self.global_limiter.clone().acquire_owned().await;
-                    if permit.is_err() {
-                        break;
-                    }
-                    let permit = permit.unwrap();
 
                     // Look up (but do NOT acquire) the per-domain semaphore
                     // here. The acquisition happens inside the spawned task:
@@ -411,8 +446,11 @@ impl<S: Spider> CrawlerEngine<S> {
                     });
                 }
                 None => {
-                    // No requests in queue - check if tasks are still running
-                    if self.active_tasks.load(Ordering::SeqCst) == 0 {
+                    // Nothing to run: hand the slot back before waiting.
+                    drop(permit);
+                    // No requests in queue - done unless a task was running
+                    // (and may have enqueued follow-ups since).
+                    if tasks_before_dequeue == 0 {
                         break;
                     }
                     // Wait a bit for tasks to produce new requests
@@ -472,8 +510,9 @@ impl<S: Spider> CrawlerEngine<S> {
     /// Fetch `{origin}/robots.txt` through the spider's configured session,
     /// so the request honors the same proxy, TLS, timeout, and header
     /// settings as every other request this crawl makes — a bare side
-    /// channel would leak direct traffic on proxied crawls (#66). Fetch
-    /// failures and non-2xx responses yield allow-all rules, as before.
+    /// channel would leak direct traffic on proxied crawls (#66). A 4xx
+    /// (no robots.txt) allows everything; a 5xx or a failed fetch means the
+    /// site is unreachable and disallows everything (RFC 9309 §2.3.1.4).
     async fn fetch_robots_via_session(
         session_manager: &SessionManager,
         user_agent: &str,
@@ -484,10 +523,19 @@ impl<S: Spider> CrawlerEngine<S> {
             .fetch(&SpiderRequest::new(&robots_url))
             .await
         {
-            Ok(response) if response.is_success() => {
-                RobotsTxtManager::parse_fetched(user_agent, Some(response.text()))
+            Ok(response) => {
+                let status = response.status();
+                if !RobotsTxtManager::status_is_reachable(status) {
+                    log::warn!(
+                        "robots.txt at {robots_url} returned status {status}; assuming full disallow"
+                    );
+                }
+                RobotsTxtManager::from_status(user_agent, Some((status, response.text())))
             }
-            _ => RobotsTxtManager::parse_fetched(user_agent, None),
+            Err(e) => {
+                log::warn!("Failed to fetch {robots_url}: {e}; assuming full disallow");
+                RobotsTxtManager::from_status(user_agent, None)
+            }
         }
     }
 
@@ -514,9 +562,53 @@ impl<S: Spider> CrawlerEngine<S> {
         } = &*ctx;
         let url = request.url().to_string();
 
-        // Check robots.txt. Lazily fetch robots.txt for domains discovered
-        // mid-crawl (only seed domains are pre-fetched), otherwise a follow
-        // link to a new host would bypass the Robots Exclusion Protocol.
+        // Check allowed_domains. Reject requests whose domain cannot be
+        // parsed (e.g. `data:`, `file://`, malformed URLs) so the whitelist
+        // cannot be bypassed by non-HTTP schemes.
+        let allowed = spider.allowed_domains();
+        if !allowed.is_empty() {
+            match request.domain() {
+                Some(domain) if allowed.contains(&domain) => {}
+                _ => {
+                    stats.lock().await.offsite_requests_count += 1;
+                    return;
+                }
+            }
+        }
+
+        // Check the dev cache BEFORE robots.txt: a readable entry is
+        // replayed from disk without contacting the site, so the Robots
+        // Exclusion Protocol does not apply to it — and an offline replay
+        // (robots.txt unreachable, hence disallow-all) keeps working.
+        let mut cache_missed = false;
+        if let Some(ref response_cache) = cache {
+            if let Some(cached) = response_cache.get(&url).await {
+                stats.lock().await.cache_hits += 1;
+
+                let fetcher_resp = FetcherResponse::new(
+                    cached.status,
+                    cached.content_type.clone(),
+                    cached.body.clone(),
+                    cached.url.clone(),
+                    cached.headers.clone(),
+                );
+                let spider_resp = SpiderResponse::new(fetcher_resp);
+
+                // Parse and collect items
+                let (parsed_items, follow_requests) = spider.parse(spider_resp).await;
+                Self::collect_items(spider, items, stats, parsed_items).await;
+                Self::enqueue_follow_requests(scheduler, follow_requests).await;
+                return;
+            }
+            cache_missed = true;
+        }
+
+        // Check robots.txt for requests that will go to the live site.
+        // Lazily fetch robots.txt for domains discovered mid-crawl (only
+        // seed domains are pre-fetched), otherwise a follow link to a new
+        // host would bypass the Robots Exclusion Protocol. Offsite requests
+        // were rejected above, so following a link never fetches robots.txt
+        // for a domain outside `allowed_domains`.
         let mut robots_crawl_delay: Option<f64> = None;
         if let Some(ref robots) = robots_manager {
             // Fetch robots.txt from the request's actual origin (scheme +
@@ -559,52 +651,18 @@ impl<S: Spider> CrawlerEngine<S> {
             }
         }
 
-        // Check allowed_domains. Reject requests whose domain cannot be
-        // parsed (e.g. `data:`, `file://`, malformed URLs) so the whitelist
-        // cannot be bypassed by non-HTTP schemes.
-        let allowed = spider.allowed_domains();
-        if !allowed.is_empty() {
-            match request.domain() {
-                Some(domain) if allowed.contains(&domain) => {}
-                _ => {
-                    stats.lock().await.offsite_requests_count += 1;
-                    return;
-                }
-            }
-        }
-
-        // Check dev cache
-        if let Some(ref response_cache) = cache {
-            if let Some(cached) = response_cache.get(&url).await {
-                stats.lock().await.cache_hits += 1;
-
-                let fetcher_resp = FetcherResponse::new(
-                    cached.status,
-                    cached.content_type.clone(),
-                    cached.body.clone(),
-                    cached.url.clone(),
-                    cached.headers.clone(),
-                );
-                let spider_resp = SpiderResponse::new(fetcher_resp);
-
-                // Parse and collect items
-                let (parsed_items, follow_requests) = spider.parse(spider_resp).await;
-                Self::collect_items(spider, items, stats, parsed_items).await;
-                Self::enqueue_follow_requests(scheduler, follow_requests).await;
-                return;
-            } else {
-                stats.lock().await.cache_misses += 1;
-                // The dispatch loop skipped the politeness delay because a
-                // cache entry existed — but it could not be read (corrupt,
-                // schema drift, or deleted since the check), so this request
-                // is about to hit the live site after all. Apply the owed
-                // delay now; without this, a directory of unreadable entries
-                // would let the whole crawl run undelayed.
-                if delay_was_skipped {
-                    let d = spider.download_delay();
-                    if d > 0.0 {
-                        tokio::time::sleep(Duration::from_secs_f64(d)).await;
-                    }
+        if cache_missed {
+            stats.lock().await.cache_misses += 1;
+            // The dispatch loop skipped the politeness delay because a
+            // cache entry existed — but it could not be read (corrupt,
+            // schema drift, or deleted since the check), so this request
+            // is about to hit the live site after all. Apply the owed
+            // delay now; without this, a directory of unreadable entries
+            // would let the whole crawl run undelayed.
+            if delay_was_skipped {
+                let d = spider.download_delay();
+                if d > 0.0 {
+                    tokio::time::sleep(Duration::from_secs_f64(d)).await;
                 }
             }
         }
@@ -708,6 +766,11 @@ impl<S: Spider> CrawlerEngine<S> {
                         let mut retry_req = request.copy();
                         retry_req.increment_retry();
                         retry_req.set_dont_filter(true);
+                        // Don't retry immediately: one priority step down
+                        // puts the retry behind everything queued at the
+                        // original priority (depth-first would otherwise
+                        // run it next, back-to-back against a block).
+                        retry_req.set_priority(request.priority().saturating_sub(1));
                         scheduler.lock().await.enqueue(retry_req);
                     }
                     return;

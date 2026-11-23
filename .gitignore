@@ -14,8 +14,9 @@ debug/
 .DS_Store
 Thumbs.db
 
-# Dev-mode cache
+# Dev-mode cache and crawl state (checkpoints)
 .scrapling_cache/
+.scrapling/
 
 # SQLite databases
 *.db

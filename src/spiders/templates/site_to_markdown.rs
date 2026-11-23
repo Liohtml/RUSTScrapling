@@ -5,6 +5,7 @@
 use crate::spiders::links::LinkExtractor;
 use crate::spiders::request::SpiderRequest;
 use crate::spiders::response::SpiderResponse;
+use crate::spiders::scheduler::CrawlStrategy;
 use crate::spiders::spider::Spider;
 use crate::spiders::templates::crawler::{follow_rules, CrawlRule};
 use async_trait::async_trait;
@@ -37,9 +38,14 @@ pub struct SiteToMarkdownSpider {
     concurrent_requests: u32,
     development_mode: bool,
     robots_txt_obey: bool,
+    crawl_strategy: CrawlStrategy,
     page_count: AtomicUsize,
     used_names: Mutex<HashSet<String>>,
 }
+
+/// Upstream Scrapling renamed `SiteToMarkdownSpider` to `ContentSpider` in
+/// v0.5 and kept the old name as an alias; both names work here too.
+pub type ContentSpider = SiteToMarkdownSpider;
 
 impl SiteToMarkdownSpider {
     /// Start building a `SiteToMarkdownSpider` with the given spider name.
@@ -101,6 +107,9 @@ impl Spider for SiteToMarkdownSpider {
     }
     fn robots_txt_obey(&self) -> bool {
         self.robots_txt_obey
+    }
+    fn crawl_strategy(&self) -> CrawlStrategy {
+        self.crawl_strategy
     }
 
     async fn parse(
@@ -189,6 +198,7 @@ impl SiteToMarkdownSpiderBuilder {
                 concurrent_requests: 4,
                 development_mode: false,
                 robots_txt_obey: false,
+                crawl_strategy: CrawlStrategy::Bfs,
                 page_count: AtomicUsize::new(0),
                 used_names: Mutex::new(HashSet::new()),
             },
@@ -271,6 +281,13 @@ impl SiteToMarkdownSpiderBuilder {
     /// Respect robots.txt.
     pub fn robots_txt_obey(mut self, on: bool) -> Self {
         self.spider.robots_txt_obey = on;
+        self
+    }
+
+    /// Order in which equal-priority pages are crawled: breadth-first (the
+    /// default — level by level from the start URLs) or depth-first.
+    pub fn crawl_strategy(mut self, strategy: CrawlStrategy) -> Self {
+        self.spider.crawl_strategy = strategy;
         self
     }
 

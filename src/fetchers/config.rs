@@ -70,6 +70,19 @@ impl Default for FetcherConfig {
     }
 }
 
+/// Re-key a header map by lowercase name. Should one header appear under
+/// two spellings (`Accept` and `accept`), the spelling that sorts last wins
+/// — an arbitrary but fixed rule, so the result never depends on hash-map
+/// iteration order.
+pub(crate) fn lowercase_header_names(headers: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut names: Vec<&String> = headers.keys().collect();
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| (name.to_ascii_lowercase(), headers[name].clone()))
+        .collect()
+}
+
 impl FetcherConfig {
     /// Returns a builder initialised with default values.
     pub fn builder() -> FetcherConfigBuilder {
@@ -80,11 +93,21 @@ impl FetcherConfig {
     ///
     /// When `stealth` is `true` the function adds several browser-like headers
     /// that make the request harder to fingerprint as a bot.
+    ///
+    /// Header names are case-insensitive, so the returned map is keyed by
+    /// lowercase names: a configured `Accept` and a generated `accept` are
+    /// one header, never two sent side by side. The User-Agent comes from
+    /// the `user_agent` option, else from a configured `User-Agent` header,
+    /// else from the built-in rotation.
     pub fn build_headers(&self, url: &str, stealth: bool) -> HashMap<String, String> {
-        let mut headers = self.headers.clone();
+        let mut headers = lowercase_header_names(&self.headers);
 
         // User-Agent is always set.
-        let ua = self.user_agent.clone().unwrap_or_else(|| {
+        let configured_ua = self
+            .user_agent
+            .clone()
+            .or_else(|| headers.get("user-agent").cloned());
+        let ua = configured_ua.unwrap_or_else(|| {
             // Pick a pseudo-random user-agent based on the URL hash so that
             // the selection is deterministic for a given URL but varies across
             // different URLs.
