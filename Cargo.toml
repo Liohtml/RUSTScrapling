@@ -11,10 +11,10 @@ homepage = "https://github.com/Liohtml/RUSTScrapling"
 keywords = ["scraping", "web-scraping", "crawler", "rag", "llm"]
 categories = ["web-programming", "parser-implementations", "command-line-utilities"]
 readme = "README.md"
-# Real MSRV: the dependency tree (cookie_store, time, icu_*) requires 1.88,
+# Real MSRV: the dependency tree (rusqlite, cookie_store, time, icu_*) requires 1.89,
 # and the committed Cargo.lock is v4 (needs Cargo >= 1.78). Verified by the
 # `msrv` CI job; the previously declared 1.75 did not actually build.
-rust-version = "1.88"
+rust-version = "1.89"
 # Keep the published package lean: docs (multi-MB GIF/PNG assets, planning
 # notes), benchmark scripts, and CI config are repo-only.
 exclude = ["docs/", "scripts/", ".github/", ".claude/"]
@@ -24,7 +24,6 @@ scraper = "0.27"
 # ego-tree must stay in lockstep with the version scraper uses, since
 # Selector stores ego_tree::NodeId directly.
 ego-tree = "0.11"
-cssparser = "0.37"
 reqwest = { version = "0.12", features = ["json", "cookies", "gzip", "brotli", "deflate", "rustls-tls"] }
 # Only the tokio pieces the library and CLI actually use — "full" would
 # force signal/process/IO-driver machinery onto every consumer.
@@ -38,7 +37,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # therefore require a crate bump rather than an OS update — Dependabot (see
 # .github/dependabot.yml) surfaces those bumps as PRs, and `cargo audit` in CI
 # flags any known advisory in the meantime.
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 regex = "1"
 encoding_rs = "0.8"
 # Transparent gzip decompression of .gz feed/sitemap bodies (pure-Rust
