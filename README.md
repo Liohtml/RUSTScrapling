@@ -7,7 +7,7 @@
 **A high-performance Rust port of [Scrapling](https://github.com/D4Vinci/Scrapling) — the modern web scraping framework built by web scrapers, for web scrapers.**
 
 [![CI](https://github.com/Liohtml/RUSTScrapling/actions/workflows/ci.yml/badge.svg)](https://github.com/Liohtml/RUSTScrapling/actions/workflows/ci.yml)
-[![Rust](https://img.shields.io/badge/Rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.89%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE-MIT)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE-APACHE)
 
@@ -80,7 +80,7 @@ Or track the latest development version straight from git:
 rust_scrapling = { git = "https://github.com/Liohtml/RUSTScrapling" }
 ```
 
-**Requirements:** Rust 1.88+ (edition 2021)
+**Requirements:** Rust 1.89+ (edition 2021)
 
 Thirty seconds to your first scrape:
 
@@ -716,7 +716,7 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt -- --check
 ```
 
-CI runs the full suite on Linux, macOS, and Windows, plus clippy, rustfmt, MSRV (1.88), and `cargo audit` on every push.
+CI runs the full suite on Linux, macOS, and Windows, plus clippy, rustfmt, MSRV (1.89), and `cargo audit` on every push.
 
 ---
 
