@@ -5,6 +5,94 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-11-23
+
+Crawl order you can choose, stricter robots.txt handling, and a batch of
+fixes — ported from upstream Scrapling v0.5 / v0.5.1. Several defaults
+change; see the migration notes.
+
+### Changed (behavior)
+
+- **Crawl order is breadth-first by default.** Requests of equal priority
+  are now served oldest-first, so a crawl visits pages level by level
+  from the start URLs. They used to be served in fingerprint-hash order,
+  which was deterministic but unrelated to discovery order — with
+  `max_pages`, `SiteToMarkdownSpider` converted an arbitrary subset of a
+  site instead of its shallowest pages.
+- **An unreachable robots.txt disallows the whole site** (RFC 9309
+  §2.3.1). A 2xx is parsed and a 4xx (no robots.txt) allows everything,
+  as before; a 5xx, a `429`, an unfollowed redirect, or a failed fetch
+  now disallows everything for the rest of the crawl. Previously any
+  failure allowed everything. Applies to the engine and to the public
+  `RobotsTxtManager::fetch_robots` / `fetch_rules`.
+- **`download_delay` is measured between dispatches** and runs alongside
+  the in-flight request. The first request is no longer delayed, and a
+  crawl ends without waiting out a window after its last request.
+- **A `User-Agent` set with `.header()` is now sent as-is** instead of
+  alongside a second, rotated one. The `user_agent` option still wins.
+- **Blocked responses are retried one priority step lower**, so the
+  retry no longer runs immediately.
+- **Minimum supported Rust version is 1.89** (was 1.88), required by the
+  `rusqlite` release that fixes a CVE in the bundled SQLite.
+
+### Added
+
+- **`CrawlStrategy::{Bfs, Dfs}`**: `Spider::crawl_strategy()` and
+  `.crawl_strategy(..)` on the `CrawlSpider` and `SiteToMarkdownSpider`
+  builders select breadth-first (default) or depth-first order for
+  equal-priority requests. Priority always wins first.
+- `Scheduler::crawl_strategy`, `Scheduler::restore_pending`; checkpoints
+  now record pending requests in dequeue order, and a resumed crawl
+  continues in that order under either strategy. Older checkpoints still
+  restore.
+- `RobotsTxtManager::from_status`, `::unreachable`,
+  `::status_is_reachable` for mapping a robots.txt fetch outcome to rules.
+- `ContentSpider`, an alias of `SiteToMarkdownSpider` (upstream's name
+  since v0.5).
+- `SpiderRequest::set_priority`.
+
+### Fixed
+
+- **Engine dispatch**: a concurrency slot is taken before a request is
+  dequeued. The loop used to pull one request out ahead of capacity, so
+  a higher-priority request enqueued meanwhile ran after it.
+- **`LinkExtractor::restrict_css` selecting the link itself**:
+  `restrict_css(["a.next"])` extracted nothing, because only descendants
+  of the matched element were searched.
+- **Duplicate headers**: header names are merged case-insensitively. A
+  configured `Accept` or a per-request `User-Agent` used to be sent next
+  to the generated lowercase one.
+- **robots.txt with a leading BOM** no longer loses its first group.
+- **`CsvFeedSpider`** strips a leading BOM so it cannot end up in the
+  first column name.
+- **Offline dev-cache replay with `robots_txt_obey`**: cached pages are
+  replayed without consulting robots.txt (a replay never contacts the
+  site), and no robots.txt is fetched for domains outside
+  `allowed_domains`.
+- Crawl termination no longer has a window in which a task could enqueue
+  follow-ups and finish between two checks.
+
+### Security
+
+- Dependency refresh past 11 RUSTSEC advisories: `rustls` 0.23.46,
+  `openssl` 0.10.82, `cookie` 0.18.3, `quinn-udp` 0.5.16, and `rusqlite`
+  0.43 (bundled SQLite CVE).
+- Removed the unused direct dependency `cssparser`.
+
+### Migration notes
+
+- **Order-dependent crawls**: if you relied on the old order, nothing
+  reproduces it; pick `CrawlStrategy::Bfs` (default) or `Dfs`, or set
+  explicit priorities.
+- **robots.txt**: a site whose robots.txt answers 5xx or times out is now
+  skipped entirely when `robots_txt_obey` is on. Look for the
+  `assuming full disallow` warning and `robots_disallowed_count` in the
+  stats if a crawl comes back empty.
+- **Headers**: `FetcherConfig::build_headers` returns lowercase header
+  names. Code reading that map by an original-case key needs the
+  lowercase name.
+- **Toolchain**: build with Rust 1.89 or newer.
+
 ## [0.4.1] - 2026-10-14
 
 Metadata and lockfile release: no code changes.
@@ -292,6 +380,7 @@ upstream Scrapling v0.4.8 through v0.4.11.
 - **CLI**: `fetch` and `extract` subcommands with CSS selector and format options
 - **175 tests** covering all modules
 
+[0.5.0]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.5.0
 [0.4.1]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.4.1
 [0.4.0]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.4.0
 [0.3.1]: https://github.com/Liohtml/RUSTScrapling/releases/tag/v0.3.1
