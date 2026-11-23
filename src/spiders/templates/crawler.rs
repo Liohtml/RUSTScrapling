@@ -10,6 +10,7 @@
 use crate::spiders::links::LinkExtractor;
 use crate::spiders::request::SpiderRequest;
 use crate::spiders::response::SpiderResponse;
+use crate::spiders::scheduler::CrawlStrategy;
 use crate::spiders::spider::Spider;
 use async_trait::async_trait;
 use std::collections::HashSet;
@@ -115,6 +116,7 @@ pub struct CrawlSpider {
     concurrent_requests: u32,
     development_mode: bool,
     robots_txt_obey: bool,
+    crawl_strategy: CrawlStrategy,
 }
 
 impl CrawlSpider {
@@ -154,6 +156,9 @@ impl Spider for CrawlSpider {
     fn robots_txt_obey(&self) -> bool {
         self.robots_txt_obey
     }
+    fn crawl_strategy(&self) -> CrawlStrategy {
+        self.crawl_strategy
+    }
 
     async fn parse(
         &self,
@@ -187,6 +192,7 @@ impl CrawlSpiderBuilder {
                 concurrent_requests: 4,
                 development_mode: false,
                 robots_txt_obey: false,
+                crawl_strategy: CrawlStrategy::Bfs,
             },
         }
     }
@@ -254,6 +260,13 @@ impl CrawlSpiderBuilder {
     /// [`Spider::robots_txt_obey`]).
     pub fn robots_txt_obey(mut self, on: bool) -> Self {
         self.spider.robots_txt_obey = on;
+        self
+    }
+
+    /// Order in which equal-priority pages are crawled: breadth-first (the
+    /// default — level by level from the start URLs) or depth-first.
+    pub fn crawl_strategy(mut self, strategy: CrawlStrategy) -> Self {
+        self.spider.crawl_strategy = strategy;
         self
     }
 

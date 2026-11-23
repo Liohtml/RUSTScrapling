@@ -80,11 +80,25 @@ impl FetcherConfig {
     ///
     /// When `stealth` is `true` the function adds several browser-like headers
     /// that make the request harder to fingerprint as a bot.
+    ///
+    /// Header names are case-insensitive, so the returned map is keyed by
+    /// lowercase names: a configured `Accept` and a generated `accept` are
+    /// one header, never two sent side by side. The User-Agent comes from
+    /// the `user_agent` option, else from a configured `User-Agent` header,
+    /// else from the built-in rotation.
     pub fn build_headers(&self, url: &str, stealth: bool) -> HashMap<String, String> {
-        let mut headers = self.headers.clone();
+        let mut headers: HashMap<String, String> = self
+            .headers
+            .iter()
+            .map(|(name, value)| (name.to_ascii_lowercase(), value.clone()))
+            .collect();
 
         // User-Agent is always set.
-        let ua = self.user_agent.clone().unwrap_or_else(|| {
+        let configured_ua = self
+            .user_agent
+            .clone()
+            .or_else(|| headers.get("user-agent").cloned());
+        let ua = configured_ua.unwrap_or_else(|| {
             // Pick a pseudo-random user-agent based on the URL hash so that
             // the selection is deterministic for a given URL but varies across
             // different URLs.

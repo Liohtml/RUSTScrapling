@@ -1144,3 +1144,108 @@ async fn robots_txt_is_fetched_through_the_configured_session() {
         "robots.txt must be fetched through the configured session; got:\n{robots_head}"
     );
 }
+
+/// Serve pages with 200 and `/robots.txt` with `robots_status` until
+/// aborted, recording every requested path.
+async fn spawn_robots_status_server(
+    robots_status: u16,
+) -> (
+    std::net::SocketAddr,
+    Arc<std::sync::Mutex<Vec<String>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let paths = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&paths);
+
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let mut buf = [0u8; 4096];
+            let mut head = Vec::new();
+            loop {
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buf[..n]);
+                if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head_text = String::from_utf8_lossy(&head);
+            let path = head_text
+                .lines()
+                .next()
+                .and_then(|l| l.split_whitespace().nth(1))
+                .unwrap_or("/")
+                .to_string();
+            let (status, body) = if path == "/robots.txt" {
+                // An error page whose body LOOKS like permissive rules: it
+                // must never be parsed as robots.txt.
+                (robots_status, "User-agent: *\nAllow: /\n".to_string())
+            } else {
+                (200, format!("<html><body>{path}</body></html>"))
+            };
+            let response = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+            recorded.lock().unwrap().push(path);
+        }
+    });
+
+    (addr, paths, handle)
+}
+
+#[tokio::test]
+async fn unreachable_robots_txt_disallows_the_whole_site() {
+    // Upstream v0.5 parity / RFC 9309 §2.3.1.4: a robots.txt that answers
+    // 5xx is "unreachable" and the site must be treated as fully
+    // disallowed — it used to be crawled as if it had no rules.
+    let (addr, paths, server) = spawn_robots_status_server(503).await;
+    let urls = vec![format!("http://{addr}/a"), format!("http://{addr}/b")];
+    let engine = CrawlerEngine::new(
+        Arc::new(RobotsSpider { urls }),
+        SessionManager::new(FetcherConfig::builder().retries(0).build()),
+        None,
+    )
+    .expect("engine builds");
+
+    let result = engine.crawl().await;
+    server.abort();
+
+    assert_eq!(result.items.len(), 0, "no page may be crawled");
+    assert_eq!(result.stats.robots_disallowed_count, 2);
+    let served = paths.lock().unwrap().clone();
+    assert!(served.iter().all(|p| p == "/robots.txt"), "{served:?}");
+}
+
+#[tokio::test]
+async fn missing_robots_txt_allows_the_whole_site() {
+    // A 4xx means the site has no robots.txt: everything is allowed.
+    let (addr, paths, server) = spawn_robots_status_server(404).await;
+    let urls = vec![format!("http://{addr}/a"), format!("http://{addr}/b")];
+    let engine = CrawlerEngine::new(
+        Arc::new(RobotsSpider { urls }),
+        SessionManager::new(FetcherConfig::builder().retries(0).build()),
+        None,
+    )
+    .expect("engine builds");
+
+    let result = engine.crawl().await;
+    server.abort();
+
+    assert_eq!(result.items.len(), 2);
+    assert_eq!(result.stats.robots_disallowed_count, 0);
+    let served = paths.lock().unwrap().clone();
+    assert!(served.contains(&"/a".to_string()) && served.contains(&"/b".to_string()));
+}

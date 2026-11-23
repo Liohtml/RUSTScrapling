@@ -255,7 +255,19 @@ impl LinkExtractor {
         // in true document order rather than grouped by tag.
         let tag_selector = self.tags.join(", ");
         for scope in &scopes {
-            for el in scope.css(&tag_selector) {
+            // A restriction can select the link element itself
+            // (`restrict_css(["a.next"])`); CSS queries only search
+            // descendants, so the scope is checked first to keep document
+            // order (an element precedes its descendants).
+            let scope_is_link = self
+                .tags
+                .iter()
+                .any(|tag| tag.eq_ignore_ascii_case(scope.tag()));
+            let elements = scope_is_link
+                .then(|| scope.clone())
+                .into_iter()
+                .chain(scope.css(&tag_selector));
+            for el in elements {
                 for attr in &self.attrs {
                     let Some(value) = el.get_attribute(attr) else {
                         continue;

@@ -2,7 +2,53 @@
 //! fingerprint-based deduplication.
 
 use super::request::SpiderRequest;
+use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashSet};
+
+/// Order in which requests of **equal priority** leave the queue. Priority
+/// always wins first; the strategy only breaks ties.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CrawlStrategy {
+    /// Breadth-first: the oldest queued request goes first, so a crawl
+    /// visits pages level by level from the start URLs. The default.
+    #[default]
+    Bfs,
+    /// Depth-first: the newest queued request goes first, so a crawl
+    /// follows a chain of links to its end before backtracking.
+    Dfs,
+}
+
+/// A queued request with its arrival counter. The heap pops the highest
+/// priority first and, among equals, the smallest counter — the counter
+/// counts up for [`CrawlStrategy::Bfs`] (oldest first) and down for
+/// [`CrawlStrategy::Dfs`] (newest first).
+struct QueueEntry {
+    counter: i64,
+    request: SpiderRequest,
+}
+
+impl QueueEntry {
+    fn key(&self) -> (i32, Reverse<i64>) {
+        (self.request.priority(), Reverse(self.counter))
+    }
+}
+
+impl PartialEq for QueueEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.key() == other.key()
+    }
+}
+impl Eq for QueueEntry {}
+impl PartialOrd for QueueEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for QueueEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.key().cmp(&other.key())
+    }
+}
 
 /// Priority queue of pending requests plus a dedup set.
 ///
@@ -16,7 +62,10 @@ use std::collections::{BinaryHeap, HashSet};
 /// set is persisted in checkpoints (via [`Scheduler::snapshot`]) so resumed
 /// crawls do not re-visit already-seen URLs.
 pub struct Scheduler {
-    queue: BinaryHeap<SpiderRequest>,
+    queue: BinaryHeap<QueueEntry>,
+    /// Next arrival counter; steps by +1 (BFS) or -1 (DFS).
+    next_counter: i64,
+    strategy: CrawlStrategy,
     /// Fingerprints of every URL enqueued so far (dedup filter). Grows
     /// unbounded with the number of unique URLs — see the type-level note.
     seen: HashSet<String>,
@@ -29,15 +78,26 @@ impl Scheduler {
     /// Create an empty scheduler. The three flags are the fingerprint
     /// options applied to every enqueued request (whether meta, headers,
     /// and URL fragments participate in dedup — the spider's `fp_*`
-    /// settings).
+    /// settings). Equal-priority requests are served breadth-first; see
+    /// [`Scheduler::crawl_strategy`] to change that.
     pub fn new(include_kwargs: bool, include_headers: bool, keep_fragments: bool) -> Self {
         Self {
             queue: BinaryHeap::new(),
+            next_counter: 0,
+            strategy: CrawlStrategy::Bfs,
             seen: HashSet::new(),
             include_kwargs,
             include_headers,
             keep_fragments,
         }
+    }
+
+    /// Set how equal-priority requests are ordered. Call this before
+    /// enqueueing: requests already queued keep the order they were given.
+    #[must_use]
+    pub fn crawl_strategy(mut self, strategy: CrawlStrategy) -> Self {
+        self.strategy = strategy;
+        self
     }
 
     /// Enqueue a request. Returns `true` if accepted, `false` if it was a
@@ -65,14 +125,20 @@ impl Scheduler {
             self.seen.insert(fp);
         }
 
-        self.queue.push(request);
+        let counter = self.next_counter;
+        self.next_counter += match self.strategy {
+            CrawlStrategy::Bfs => 1,
+            CrawlStrategy::Dfs => -1,
+        };
+        self.queue.push(QueueEntry { counter, request });
         true
     }
 
-    /// Pop the highest-priority pending request (ties broken by
-    /// fingerprint for determinism).
+    /// Pop the highest-priority pending request. Ties are broken by the
+    /// [`CrawlStrategy`]: oldest first (BFS, the default) or newest first
+    /// (DFS).
     pub fn dequeue(&mut self) -> Option<SpiderRequest> {
-        self.queue.pop()
+        self.queue.pop().map(|entry| entry.request)
     }
 
     /// Whether no requests are pending (the seen set may still be
@@ -103,16 +169,38 @@ impl Scheduler {
     /// Borrow all pending requests, in unspecified (heap) order.
     #[must_use]
     pub fn pending_requests(&self) -> Vec<&SpiderRequest> {
-        self.queue.iter().collect()
+        self.queue.iter().map(|entry| &entry.request).collect()
     }
 
     /// Snapshot the scheduler state for checkpointing: a full copy of all
     /// pending requests (method, headers, body, meta, priority — everything,
-    /// not just the URL) plus a copy of the seen fingerprint set.
+    /// not just the URL) **in the order they would be dequeued**, plus a
+    /// copy of the seen fingerprint set. Feed the pending list back through
+    /// [`Scheduler::restore_pending`] to resume in the same order.
     pub fn snapshot(&self) -> (Vec<SpiderRequest>, Vec<String>) {
-        let pending = self.queue.iter().cloned().collect();
+        let mut entries: Vec<&QueueEntry> = self.queue.iter().collect();
+        entries.sort_by(|a, b| b.cmp(a));
+        let pending = entries.into_iter().map(|e| e.request.clone()).collect();
         let seen = self.seen.iter().cloned().collect();
         (pending, seen)
+    }
+
+    /// Re-queue pending requests from a checkpoint, given in dequeue order
+    /// (as [`Scheduler::snapshot`] returns them), so the resumed crawl
+    /// continues in that same order under either [`CrawlStrategy`]. The
+    /// requests bypass the dedup filter: their fingerprints are usually in
+    /// the restored seen set already, and they must be crawled regardless.
+    pub fn restore_pending(&mut self, requests: Vec<SpiderRequest>) {
+        let ordered: Box<dyn Iterator<Item = SpiderRequest>> = match self.strategy {
+            CrawlStrategy::Bfs => Box::new(requests.into_iter()),
+            // Newest-first: queue the last-to-run first so the first-to-run
+            // ends up newest.
+            CrawlStrategy::Dfs => Box::new(requests.into_iter().rev()),
+        };
+        for mut request in ordered {
+            request.set_dont_filter(true);
+            self.enqueue(request);
+        }
     }
 
     /// Restore the seen fingerprint set from a checkpoint so a resumed crawl

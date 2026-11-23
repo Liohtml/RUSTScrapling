@@ -254,8 +254,11 @@ impl Fetcher {
     ) -> Result<Response, FetcherError> {
         let mut headers = self.config.build_headers(url, self.config.stealthy_headers);
         if let Some(extra) = extra_headers {
+            // `headers` is keyed by lowercase names; a per-request header
+            // spelled differently must replace the configured one, not be
+            // sent next to it.
             for (k, v) in extra {
-                headers.insert(k.clone(), v.clone());
+                headers.insert(k.to_ascii_lowercase(), v.clone());
             }
         }
 

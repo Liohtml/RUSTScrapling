@@ -151,6 +151,62 @@ fn custom_header_is_preserved_in_stealth_mode() {
     );
 }
 
+#[test]
+fn header_names_are_merged_case_insensitively() {
+    // Upstream v0.5 parity: header names are case-insensitive, so a
+    // configured `Accept` must replace the generated stealth `accept`
+    // instead of being sent next to it.
+    let cfg = FetcherConfig::builder()
+        .header("Accept", "application/json")
+        .header("X-Request-Id", "abc123")
+        .build();
+    let headers = cfg.build_headers("https://example.com", true);
+    assert_eq!(
+        headers.get("accept").map(String::as_str),
+        Some("application/json")
+    );
+    assert_eq!(
+        headers.get("x-request-id").map(String::as_str),
+        Some("abc123")
+    );
+    assert!(
+        headers.keys().all(|k| *k == k.to_ascii_lowercase()),
+        "all header names are lowercase: {headers:?}"
+    );
+}
+
+#[test]
+fn configured_user_agent_header_is_not_overridden_by_the_rotation() {
+    // A `User-Agent` set through `.header()` used to be sent alongside a
+    // second, rotated `user-agent`.
+    let cfg = FetcherConfig::builder()
+        .header("User-Agent", "HeaderBot/1.0")
+        .build();
+    let headers = cfg.build_headers("https://example.com", true);
+    assert_eq!(
+        headers.get("user-agent").map(String::as_str),
+        Some("HeaderBot/1.0")
+    );
+    assert_eq!(
+        headers
+            .keys()
+            .filter(|k| k.eq_ignore_ascii_case("user-agent"))
+            .count(),
+        1
+    );
+
+    // The dedicated option still wins over the header.
+    let cfg = FetcherConfig::builder()
+        .header("User-Agent", "HeaderBot/1.0")
+        .user_agent("OptionBot/2.0")
+        .build();
+    let headers = cfg.build_headers("https://example.com", false);
+    assert_eq!(
+        headers.get("user-agent").map(String::as_str),
+        Some("OptionBot/2.0")
+    );
+}
+
 // ---------------------------------------------------------------------------
 // ProxyRotator
 // ---------------------------------------------------------------------------

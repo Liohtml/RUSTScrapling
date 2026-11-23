@@ -10,6 +10,6 @@ pub mod xml_feed;
 pub use crawler::{CrawlRule, CrawlSpider};
 pub use csv_feed::CsvFeedSpider;
 pub use shopify::ShopifySpider;
-pub use site_to_markdown::SiteToMarkdownSpider;
+pub use site_to_markdown::{ContentSpider, SiteToMarkdownSpider};
 pub use sitemap::SitemapSpider;
 pub use xml_feed::XmlFeedSpider;

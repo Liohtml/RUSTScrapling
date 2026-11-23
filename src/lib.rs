@@ -156,9 +156,10 @@ pub use spiders::engine::CrawlerEngine;
 pub use spiders::links::LinkExtractor;
 pub use spiders::request::SpiderRequest;
 pub use spiders::result::{CrawlResult, CrawlStats, ItemList};
+pub use spiders::scheduler::CrawlStrategy;
 pub use spiders::session::{SessionError, SessionManager};
 pub use spiders::spider::Spider;
 pub use spiders::templates::{
-    CrawlRule, CrawlSpider, CsvFeedSpider, ShopifySpider, SiteToMarkdownSpider, SitemapSpider,
-    XmlFeedSpider,
+    ContentSpider, CrawlRule, CrawlSpider, CsvFeedSpider, ShopifySpider, SiteToMarkdownSpider,
+    SitemapSpider, XmlFeedSpider,
 };

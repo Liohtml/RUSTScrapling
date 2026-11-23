@@ -241,3 +241,40 @@ fn canonicalize_drops_empty_query_and_preserves_raw_bytes() {
         "https://example.com/?a=%FF"
     );
 }
+
+#[test]
+fn restrict_css_can_select_the_link_element_itself() {
+    // Upstream v0.5 parity: CSS queries only search descendants, so a
+    // restriction that selects the <a> itself used to extract nothing.
+    let resp = page(
+        "https://example.com/list",
+        r#"<body>
+            <a class="next" href="/page/2">next</a>
+            <a href="/other">other</a>
+            <div class="nav"><a class="next" href="/page/3">again</a></div>
+        </body>"#,
+    );
+    let links = LinkExtractor::new().restrict_css(["a.next"]).extract(&resp);
+    assert_eq!(
+        links,
+        vec!["https://example.com/page/2", "https://example.com/page/3"]
+    );
+
+    // A scope that is a link AND contains links yields itself first, then
+    // its descendants, in document order.
+    let resp = page(
+        "https://example.com/",
+        r#"<map><area class="hot" href="/outer"><a href="/inner">i</a></area></map>"#,
+    );
+    let links = LinkExtractor::new()
+        .restrict_css(["area.hot", "map"])
+        .extract(&resp);
+    assert_eq!(links[0], "https://example.com/outer");
+
+    // A restriction that matches nothing still yields no links.
+    let resp = page("https://example.com/", r#"<a href="/x">x</a>"#);
+    assert!(LinkExtractor::new()
+        .restrict_css([".missing"])
+        .extract(&resp)
+        .is_empty());
+}

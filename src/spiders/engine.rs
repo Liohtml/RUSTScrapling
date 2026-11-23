@@ -156,7 +156,8 @@ impl<S: Spider> CrawlerEngine<S> {
             spider.fp_include_kwargs(),
             spider.fp_include_headers(),
             spider.fp_keep_fragments(),
-        );
+        )
+        .crawl_strategy(spider.crawl_strategy());
 
         let throttle = if spider.autothrottle_enabled() {
             Some(Arc::new(std::sync::Mutex::new(AutoThrottle::new(
@@ -230,18 +231,16 @@ impl<S: Spider> CrawlerEngine<S> {
                         // Full requests (method, headers, body, meta,
                         // priority) survived the checkpoint — restore them
                         // as-is rather than degrading to bare GETs.
-                        for mut req in data.pending_requests {
-                            req.set_dont_filter(true);
-                            sched.enqueue(req);
-                        }
+                        sched.restore_pending(data.pending_requests);
                     } else {
                         // Checkpoint written before `pending_requests`
                         // existed: only bare URLs are available.
-                        for url in &data.pending_urls {
-                            let mut req = SpiderRequest::new(url);
-                            req.set_dont_filter(true);
-                            sched.enqueue(req);
-                        }
+                        sched.restore_pending(
+                            data.pending_urls
+                                .iter()
+                                .map(|url| SpiderRequest::new(url))
+                                .collect(),
+                        );
                     }
                     true
                 } else {
@@ -308,6 +307,21 @@ impl<S: Spider> CrawlerEngine<S> {
                 break;
             }
 
+            // Take a concurrency slot BEFORE taking a request. Dequeuing
+            // first would pull one request out ahead of capacity and hold
+            // it while every slot is busy: the pages being crawled could
+            // then no longer influence what runs next, which breaks
+            // depth-first order and lets an already-held request run ahead
+            // of a higher-priority one enqueued meanwhile.
+            let Ok(permit) = self.global_limiter.clone().acquire_owned().await else {
+                break;
+            };
+            // A pause requested while waiting for the slot must leave the
+            // next request in the queue for the checkpoint.
+            if self.paused.load(Ordering::SeqCst) {
+                break;
+            }
+
             let request = {
                 let mut sched = self.scheduler.lock().await;
                 sched.dequeue()
@@ -351,12 +365,6 @@ impl<S: Spider> CrawlerEngine<S> {
                             tokio::time::sleep(Duration::from_secs_f64(delay)).await;
                         }
                     }
-
-                    let permit = self.global_limiter.clone().acquire_owned().await;
-                    if permit.is_err() {
-                        break;
-                    }
-                    let permit = permit.unwrap();
 
                     // Look up (but do NOT acquire) the per-domain semaphore
                     // here. The acquisition happens inside the spawned task:
@@ -411,6 +419,8 @@ impl<S: Spider> CrawlerEngine<S> {
                     });
                 }
                 None => {
+                    // Nothing to run: hand the slot back before waiting.
+                    drop(permit);
                     // No requests in queue - check if tasks are still running
                     if self.active_tasks.load(Ordering::SeqCst) == 0 {
                         break;
@@ -472,8 +482,9 @@ impl<S: Spider> CrawlerEngine<S> {
     /// Fetch `{origin}/robots.txt` through the spider's configured session,
     /// so the request honors the same proxy, TLS, timeout, and header
     /// settings as every other request this crawl makes — a bare side
-    /// channel would leak direct traffic on proxied crawls (#66). Fetch
-    /// failures and non-2xx responses yield allow-all rules, as before.
+    /// channel would leak direct traffic on proxied crawls (#66). A 4xx
+    /// (no robots.txt) allows everything; a 5xx or a failed fetch means the
+    /// site is unreachable and disallows everything (RFC 9309 §2.3.1.4).
     async fn fetch_robots_via_session(
         session_manager: &SessionManager,
         user_agent: &str,
@@ -484,10 +495,19 @@ impl<S: Spider> CrawlerEngine<S> {
             .fetch(&SpiderRequest::new(&robots_url))
             .await
         {
-            Ok(response) if response.is_success() => {
-                RobotsTxtManager::parse_fetched(user_agent, Some(response.text()))
+            Ok(response) => {
+                let status = response.status();
+                if !(200..500).contains(&status) {
+                    log::warn!(
+                        "robots.txt at {robots_url} returned status {status}; assuming full disallow"
+                    );
+                }
+                RobotsTxtManager::from_status(user_agent, Some((status, response.text())))
             }
-            _ => RobotsTxtManager::parse_fetched(user_agent, None),
+            Err(e) => {
+                log::warn!("Failed to fetch {robots_url}: {e}; assuming full disallow");
+                RobotsTxtManager::from_status(user_agent, None)
+            }
         }
     }
 
