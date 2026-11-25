@@ -20,7 +20,7 @@ rust-version = "1.89"
 exclude = ["docs/", "scripts/", ".github/", ".claude/"]
 
 [dependencies]
-scraper = "0.27"
+scraper = "0.29"
 # ego-tree must stay in lockstep with the version scraper uses, since
 # Selector stores ego_tree::NodeId directly.
 ego-tree = "0.11"
